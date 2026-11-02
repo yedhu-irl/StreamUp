@@ -13,7 +13,7 @@ function getCredentials(): { apiKey: string; accessToken: string } {
   const envToken = import.meta.env.VITE_TMDB_ACCESS_TOKEN;
   const localKey = localStorage.getItem('streamup_tmdb_key');
 
-  const apiKey = localKey || envKey || '1381e9212d87c29fed4b981b8573c018';
+  const apiKey = localKey || envKey || '';
   const accessToken = envToken || '';
   return { apiKey, accessToken };
 }

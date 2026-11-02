@@ -253,7 +253,7 @@ async function handleStreamRequest(request, streamId) {
       'Content-Length': contentLength.toString(),
       'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store, no-cache, must-revalidate',
-      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Origin': self.location.origin,
     },
   });
 }

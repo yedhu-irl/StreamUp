@@ -120,9 +120,14 @@ export class TgStreamEngine {
 
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker.addEventListener('message', async (event) => {
+        if (event.origin && event.origin !== window.location.origin) return;
         const { type, requestId, streamId, chunkIndex } = event.data || {};
         if (type === 'REQUEST_CHUNK' && event.ports && event.ports[0]) {
           const port = event.ports[0];
+          if (typeof chunkIndex !== 'number' || chunkIndex < 0 || !Number.isInteger(chunkIndex)) {
+            port.postMessage({ type: 'CHUNK_RESPONSE', requestId, error: 'Invalid chunk index' });
+            return;
+          }
           try {
             const chunk = await this.getChunk(streamId, chunkIndex);
             port.postMessage({ type: 'CHUNK_RESPONSE', requestId, data: chunk });
