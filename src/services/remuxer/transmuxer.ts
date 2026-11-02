@@ -42,6 +42,7 @@ export class MatroskaTransmuxer {
   private pps: Uint8Array | null = null;
   private initSegmentGenerated = false;
   private audioInitSegmentGenerated = false;
+  private waitingForKeyframe = false;
   private sequenceNumber = 1;
   private audioSequenceNumber = 1;
   private defaultSampleDurationMs = 40; // 25fps fallback default
@@ -217,8 +218,18 @@ export class MatroskaTransmuxer {
     if (blocks.length === 0) return null;
 
     // Filter to video track blocks
-    const videoBlocks = blocks.filter((b) => b.trackNumber === this.videoTrack!.trackNumber);
+    let videoBlocks = blocks.filter((b) => b.trackNumber === this.videoTrack!.trackNumber);
     if (videoBlocks.length === 0) return null;
+
+    if (this.waitingForKeyframe) {
+      const firstKeyIdx = videoBlocks.findIndex((b) => b.isKeyframe);
+      if (firstKeyIdx === -1) {
+        // Discard cluster with no keyframe after seek
+        return null;
+      }
+      videoBlocks = videoBlocks.slice(firstKeyIdx);
+      this.waitingForKeyframe = false;
+    }
 
     let initSegment: Uint8Array | undefined;
 
@@ -340,5 +351,6 @@ export class MatroskaTransmuxer {
     // When seeking to a new timeline point, reset sequence numbers
     this.sequenceNumber = 1;
     this.audioSequenceNumber = 1;
+    this.waitingForKeyframe = true;
   }
 }

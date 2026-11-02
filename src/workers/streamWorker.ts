@@ -216,6 +216,9 @@ let mimeType = 'video/x-matroska';
 
 let currentReadOffset = 0;
 let activeLoopId = 0;
+let currentPlayheadSec = 0;
+let lastEmittedPtsSec = 0;
+let isVideoPaused = false;
 
 // Residual byte buffer for incomplete clusters across chunk boundaries
 let clusterAccumulator: Uint8Array = new Uint8Array(0);
@@ -353,6 +356,15 @@ async function runStreamLoop(loopId: number) {
       continue;
     }
 
+    // 1-minute window matrix check:
+    // Only buffer up to 30s forward from current playhead position!
+    // (Total cache matrix = 30s backward + 30s forward = 1 minute total)
+    const forwardBufferedSec = lastEmittedPtsSec - currentPlayheadSec;
+    if (lastEmittedPtsSec > 0 && forwardBufferedSec >= 30) {
+      await new Promise((r) => setTimeout(r, 200));
+      continue;
+    }
+
     // Check if we have a full cluster in accumulator
     let handledCluster = processAccumulator();
 
@@ -470,6 +482,7 @@ function processAccumulator(): boolean {
   }
 
   if (result?.mediaSegment) {
+    lastEmittedPtsSec = result.endPtsMs / 1000;
     postWorkerMessage(
       {
         type: 'MEDIA_SEGMENT',
@@ -508,6 +521,9 @@ async function seekTo(targetTimeSec: number) {
   fetcher.abortAll();
   clusterAccumulator = new Uint8Array(0);
 
+  currentPlayheadSec = targetTimeSec;
+  lastEmittedPtsSec = targetTimeSec;
+
   postWorkerMessage({ type: 'STATUS', status: `Seeking to ${Math.round(targetTimeSec)}s...` });
 
   let targetByteOffset = metadata.segmentDataOffset;
@@ -531,7 +547,9 @@ async function seekTo(targetTimeSec: number) {
     // Fallback: estimate from average bitrate
     const ratio = Math.max(0, Math.min(1, targetTimeSec / metadata.durationSec));
     const estimated = metadata.segmentDataOffset + Math.floor(ratio * (totalFileSize - metadata.segmentDataOffset));
-    targetByteOffset = DownloadWindow.alignOffset(estimated);
+    // Step back 1MB to ensure we don't start past the keyframe cluster preceding the target
+    const steppedBack = Math.max(metadata.segmentDataOffset, estimated - 1024 * 1024);
+    targetByteOffset = DownloadWindow.alignOffset(steppedBack);
   }
 
   // Align to 4096 bytes
@@ -566,6 +584,11 @@ self.onmessage = (event) => {
 
     case 'SEEK':
       seekTo(event.data.targetTimeSec);
+      break;
+
+    case 'PLAYHEAD_UPDATE':
+      currentPlayheadSec = event.data.currentTimeSec || 0;
+      isVideoPaused = Boolean(event.data.isPaused);
       break;
 
     case 'PAUSE':

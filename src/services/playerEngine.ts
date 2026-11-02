@@ -122,8 +122,12 @@ export class PlayerEngine {
       onReady: (dur) => {
         if (this.isDestroyed) return;
         this.options.onReady?.(dur);
-        if (this.options.initialTime && this.options.initialTime > 0) {
+        if (this.options.initialTime && this.options.initialTime >= 30) {
           this.mseController?.seek(this.options.initialTime);
+        } else if (this.options.initialTime && this.options.initialTime > 0) {
+          try {
+            this.video.currentTime = this.options.initialTime;
+          } catch (e) {}
         }
         this.video.play().catch(() => {});
       },
@@ -173,6 +177,12 @@ export class PlayerEngine {
   }
 
   public seek(timeSec: number): void {
+    if (this.activePath === 'mse' && this.mseController) {
+      if (this.mseController.isLocallyBuffered(timeSec)) {
+        this.mseController.seek(timeSec);
+        return;
+      }
+    }
     tgStreamEngine.recenterRingBuffer(this.options.streamId, timeSec, this.video.duration || 0);
     if (this.activePath === 'mse' && this.mseController) {
       this.mseController.seek(timeSec);

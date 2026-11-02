@@ -616,9 +616,14 @@ export const Player: React.FC<PlayerProps> = ({
           if (videoRef.current && videoRef.current.duration) setDuration(videoRef.current.duration);
         }}
         onWaiting={() => setIsBuffering(true)}
+        onCanPlay={() => {
+          setIsBuffering(false);
+          setPlaybackStatus('');
+        }}
         onPlaying={() => {
           setIsBuffering(false);
           setIsPlaying(true);
+          setPlaybackStatus('');
         }}
         onPause={() => setIsPlaying(false)}
         onEnded={() => {

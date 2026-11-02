@@ -37,6 +37,8 @@ export class MSEController {
   private pendingSeekTarget: number | null = null;
   private pendingVideoCodec: string | null = null;
   private pendingAudioCodec: string | null = null;
+  private lastSentPlayheadTime = -1;
+  private videoPlayheadListener: (() => void) | null = null;
 
   constructor(video: HTMLVideoElement, events: MSEControllerEvents = {}) {
     this.video = video;
@@ -111,8 +113,40 @@ export class MSEController {
       mimeType,
     });
 
+    // Bind playhead tracking to feed 1-minute matrix boundary to worker
+    this.videoPlayheadListener = () => {
+      this.sendPlayheadUpdate();
+    };
+    this.video.addEventListener('timeupdate', this.videoPlayheadListener);
+    this.video.addEventListener('pause', this.videoPlayheadListener);
+    this.video.addEventListener('play', this.videoPlayheadListener);
+
     // Setup proactive sliding window buffer eviction every 8 seconds
     this.startEvictionLoop();
+  }
+
+  private sendPlayheadUpdate(): void {
+    if (!this.worker) return;
+    const now = this.video.currentTime;
+    if (Math.abs(now - this.lastSentPlayheadTime) >= 0.5 || this.video.paused) {
+      this.lastSentPlayheadTime = now;
+      this.worker.postMessage({
+        type: 'PLAYHEAD_UPDATE',
+        currentTimeSec: now,
+        isPaused: this.video.paused,
+      });
+    }
+  }
+
+  public isLocallyBuffered(timeSec: number): boolean {
+    const b = this.video.buffered;
+    if (!b || b.length === 0) return false;
+    for (let i = 0; i < b.length; i++) {
+      if (timeSec >= b.start(i) && timeSec <= b.end(i) - 0.5) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private handleWorkerMessage(msg: any): void {
@@ -174,6 +208,12 @@ export class MSEController {
 
       case 'SEEK_READY': {
         this.isSeeking = false;
+        this.events.onStatus?.('');
+        if (msg.actualTimeSec !== undefined) {
+          try {
+            this.video.currentTime = msg.actualTimeSec;
+          } catch (e) {}
+        }
         if (this.pendingSeekTarget !== null) {
           const target = this.pendingSeekTarget;
           this.pendingSeekTarget = null;
@@ -379,6 +419,16 @@ export class MSEController {
       return;
     }
 
+    // Fast-path: If target is already within locally buffered 1-minute matrix, jump immediately without worker abort!
+    if (this.isLocallyBuffered(targetTimeSec)) {
+      try {
+        this.video.currentTime = targetTimeSec;
+        this.sendPlayheadUpdate();
+        this.events.onStatus?.('');
+      } catch (e) {}
+      return;
+    }
+
     this.isSeeking = true;
     this.segmentQueue = [];
     this.audioQueue = [];
@@ -472,6 +522,13 @@ export class MSEController {
   }
 
   public destroy(): void {
+    if (this.videoPlayheadListener) {
+      this.video.removeEventListener('timeupdate', this.videoPlayheadListener);
+      this.video.removeEventListener('pause', this.videoPlayheadListener);
+      this.video.removeEventListener('play', this.videoPlayheadListener);
+      this.videoPlayheadListener = null;
+    }
+
     this.stopEvictionLoop();
     this.segmentQueue = [];
     this.audioQueue = [];
