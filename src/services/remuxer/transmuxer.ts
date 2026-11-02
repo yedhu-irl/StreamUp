@@ -69,7 +69,9 @@ export class MatroskaTransmuxer {
     }
 
     if (metadata.audioTracks.length > 0) {
-      this.audioTrack = metadata.audioTracks[0];
+      // Prefer supported audio track (e.g. AAC) if present among multiple tracks
+      const supportedTrack = metadata.audioTracks.find((t) => t.codecId === 'A_AAC');
+      this.audioTrack = supportedTrack || metadata.audioTracks[0];
     }
   }
 
@@ -107,16 +109,15 @@ export class MatroskaTransmuxer {
     if (cid === 'A_AAC') {
       return 'audio/mp4; codecs="mp4a.40.2"';
     }
-    if (cid === 'A_AC3' || cid === 'A_EAC3') {
-      return 'audio/mp4; codecs="ac-3"';
-    }
-    return null; // Unsupported by standard MSE (e.g. DTS, TrueHD)
+    // AC3, EAC3, DTS, TrueHD cannot be remuxed by mp4Generator
+    return null;
   }
 
   public isAudioSupported(): boolean {
     if (!this.audioTrack) return false;
     const cid = this.audioTrack.codecId;
-    return cid === 'A_AAC' || cid === 'A_MPEG/L3';
+    // mp4Generator only supports AAC (mp4a with AudioSpecificConfig)
+    return cid === 'A_AAC';
   }
 
   public getAudioCodecName(): string {
@@ -314,7 +315,7 @@ export class MatroskaTransmuxer {
     let audioInitSegment: Uint8Array | undefined;
     let audioMediaSegment: Uint8Array | undefined;
 
-    if (this.audioTrack && (this.audioTrack.codecId === 'A_AAC' || this.audioTrack.codecId === 'A_MPEG/L3')) {
+    if (this.audioTrack && this.isAudioSupported()) {
       if (!this.audioInitSegmentGenerated) {
         const audioConfig: AudioTrackConfig = {
           trackId: 2,
@@ -330,11 +331,14 @@ export class MatroskaTransmuxer {
       const audioBlocks = blocks.filter((b) => b.trackNumber === this.audioTrack!.trackNumber);
       if (audioBlocks.length > 0) {
         const audioSamples: AudioSample[] = [];
+        const sampleRate = Math.round(this.audioTrack.samplingFrequency || 48000);
+        const standardFrameDur = Math.round((1024 / sampleRate) * 1000);
+
         for (let i = 0; i < audioBlocks.length; i++) {
           const cur = audioBlocks[i];
           const next = audioBlocks[i + 1];
-          let dur = next ? Math.max(1, next.ptsMs - cur.ptsMs) : 21;
-          if (dur > 200) dur = 21;
+          let dur = next ? Math.max(1, next.ptsMs - cur.ptsMs) : standardFrameDur;
+          if (dur > 200) dur = standardFrameDur;
 
           audioSamples.push({
             data: cur.data,

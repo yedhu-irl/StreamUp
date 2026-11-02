@@ -89,6 +89,7 @@ async function getChunkFromIndexedDB(streamId: string, chunkIndex: number): Prom
 class ChunkFetcher {
   private channel: BroadcastChannel | null = null;
   private pendingRequests = new Map<string, FetchRequestRecord>();
+  private prefetchMap = new Map<string, Promise<Uint8Array>>();
   private requestCounter = 0;
 
   constructor() {
@@ -130,23 +131,43 @@ class ChunkFetcher {
   }
 
   public async fetchChunkByIndex(streamId: string, chunkIndex: number, timeoutMs = 25000): Promise<Uint8Array> {
+    const cacheKey = `${streamId}_${chunkIndex}`;
+    const cached = this.prefetchMap.get(cacheKey);
+    if (cached) {
+      try {
+        return await cached;
+      } catch {
+        this.prefetchMap.delete(cacheKey);
+      }
+    }
+
     // 1. Direct IndexedDB check first (0ms)
     const dbBuf = await getChunkFromIndexedDB(streamId, chunkIndex);
     if (dbBuf && dbBuf.byteLength > 0) {
-      return new Uint8Array(dbBuf);
+      const u8 = new Uint8Array(dbBuf);
+      this.prefetchMap.set(cacheKey, Promise.resolve(u8));
+      return u8;
     }
 
     // 2. Request from tgStreamEngine via tg-stream-rpc
     const requestId = `wrk_${++this.requestCounter}_${Date.now()}`;
-    return new Promise((resolve, reject) => {
+    const fetchPromise = new Promise<Uint8Array>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(requestId);
+        this.prefetchMap.delete(cacheKey);
         reject(new Error(`Chunk fetch timeout for chunk ${chunkIndex}`));
       }, timeoutMs);
 
       this.pendingRequests.set(requestId, {
-        resolve: (ab: ArrayBuffer) => resolve(new Uint8Array(ab)),
-        reject,
+        resolve: (ab: ArrayBuffer) => {
+          const u8 = new Uint8Array(ab);
+          this.prefetchMap.set(cacheKey, Promise.resolve(u8));
+          resolve(u8);
+        },
+        reject: (err: Error) => {
+          this.prefetchMap.delete(cacheKey);
+          reject(err);
+        },
         timer,
       });
 
@@ -166,6 +187,34 @@ class ChunkFetcher {
         });
       }
     });
+
+    this.prefetchMap.set(cacheKey, fetchPromise);
+    return fetchPromise;
+  }
+
+  public prefetchAhead(streamId: string, currentChunk: number, aheadCount = 3): void {
+    const CHUNK_SIZE = 512 * 1024;
+    for (let i = 1; i <= aheadCount; i++) {
+      const targetChunk = currentChunk + i;
+      if (totalFileSize > 0 && targetChunk * CHUNK_SIZE >= totalFileSize) break;
+      const key = `${streamId}_${targetChunk}`;
+      if (!this.prefetchMap.has(key)) {
+        this.fetchChunkByIndex(streamId, targetChunk).catch(() => {
+          this.prefetchMap.delete(key);
+        });
+      }
+    }
+
+    // Bound in-memory cache to prevent memory bloat (max 12 chunks)
+    if (this.prefetchMap.size > 12) {
+      for (const [key] of this.prefetchMap) {
+        const parts = key.split('_');
+        const idx = Number(parts[parts.length - 1]);
+        if (idx < currentChunk - 1) {
+          this.prefetchMap.delete(key);
+        }
+      }
+    }
   }
 
   public async fetch(
@@ -212,6 +261,7 @@ class ChunkFetcher {
   }
 
   public abortAll(): void {
+    this.prefetchMap.clear();
     for (const [id, req] of this.pendingRequests.entries()) {
       clearTimeout(req.timer);
       req.reject(new Error('Operation aborted'));
@@ -238,6 +288,7 @@ let activeLoopId = 0;
 let currentPlayheadSec = 0;
 let lastEmittedPtsSec = 0;
 let isVideoPaused = false;
+let isBufferFull = false;
 
 // Sub-cluster streaming parser state
 let inCluster = false;
@@ -255,6 +306,7 @@ async function startStream(
 ) {
   isRunning = true;
   isPaused = false;
+  isBufferFull = false;
   activeChannelId = channelId;
   activeMessageId = messageId;
   totalFileSize = fileSize;
@@ -356,14 +408,16 @@ async function startStream(
     }
 
     // 3. Locate first media cluster
+    // Note: Bytes 0..headerLimit have already been fetched in Chunk 0.
+    // currentReadOffset must be set to headerLimit so Chunk 0 is never re-fetched.
     const firstClusterRel = findNextCluster(initialU8, metadata.segmentDataOffset);
     if (firstClusterRel !== -1) {
-      currentReadOffset = firstClusterRel;
-      clusterAccumulator = initialU8.subarray(firstClusterRel);
+      clusterAccumulator = initialU8.slice(firstClusterRel);
     } else {
-      currentReadOffset = metadata.segmentDataOffset;
-      clusterAccumulator = new Uint8Array(0);
+      // If no cluster found in header chunk, retain trailing 3 bytes for boundary detection
+      clusterAccumulator = initialU8.slice(Math.max(metadata.segmentDataOffset, headerLimit - 3));
     }
+    currentReadOffset = headerLimit;
 
     // 4. Begin continuous segment-based streaming loop
     runStreamLoop(thisLoopId);
@@ -376,6 +430,9 @@ async function startStream(
 
 async function runStreamLoop(loopId: number) {
   const CHUNK_SIZE = 512 * 1024; // 512 KB per request
+  const BUFFER_TARGET_SEC = 50; // Elastic buffer target up to 45-60s
+  const BUFFER_RESUME_SEC = 35; // Hysteresis floor
+  const LOW_WATERMARK_SEC = 10; // Low-watermark burst threshold
 
   while (isRunning && loopId === activeLoopId) {
     if (isPaused) {
@@ -383,26 +440,46 @@ async function runStreamLoop(loopId: number) {
       continue;
     }
 
-    // 1-minute window matrix check:
-    // Only buffer up to 30s forward from current playhead position!
-    // (Total cache matrix = 30s backward + 30s forward = 1 minute total)
-    const forwardBufferedSec = lastEmittedPtsSec - currentPlayheadSec;
-    if (lastEmittedPtsSec > 0 && forwardBufferedSec >= 30) {
+    const forwardBufferedSec = lastEmittedPtsSec > 0 ? (lastEmittedPtsSec - currentPlayheadSec) : 0;
+
+    // Elastic buffer window with hysteresis:
+    // Prevents frequent stop-and-go stall cycles by prefetching up to 50s and resuming at 35s
+    if (isBufferFull) {
+      if (forwardBufferedSec < BUFFER_RESUME_SEC) {
+        isBufferFull = false;
+      } else {
+        await new Promise((r) => setTimeout(r, 200));
+        continue;
+      }
+    } else if (lastEmittedPtsSec > 0 && forwardBufferedSec >= BUFFER_TARGET_SEC) {
+      isBufferFull = true;
       await new Promise((r) => setTimeout(r, 200));
       continue;
     }
 
-    // Check if we have a full cluster in accumulator
-    let handledCluster = processAccumulator();
+    // Check if we have a full cluster / completed blocks in accumulator
+    let handledCluster = processAccumulator(currentReadOffset >= totalFileSize);
 
     if (!handledCluster) {
       // Need more data from Telegram
       if (currentReadOffset >= totalFileSize) {
+        if (processAccumulator(true)) {
+          continue;
+        }
         postWorkerMessage({ type: 'EOF' });
         break;
       }
 
+      // Pipelined lookahead prefetching:
+      // Low watermark (<10s) triggers aggressive burst prefetch (3 chunks ahead)
+      const isLowWatermark = forwardBufferedSec < LOW_WATERMARK_SEC;
+      const prefetchLookahead = isLowWatermark ? 3 : 2;
       const fetchOffset = DownloadWindow.alignOffset(currentReadOffset);
+      const currentChunk = Math.floor(fetchOffset / CHUNK_SIZE);
+      const streamId = `${activeChannelId}_${activeMessageId}`;
+
+      fetcher.prefetchAhead(streamId, currentChunk, prefetchLookahead);
+
       const fetchSize = Math.min(CHUNK_SIZE, totalFileSize - fetchOffset);
 
       try {
@@ -441,7 +518,7 @@ async function runStreamLoop(loopId: number) {
  * Inspects clusterAccumulator. Parses and transmuxes media blocks incrementally in sub-clusters.
  * Emits MEDIA_SEGMENT every ~8-15 blocks (~300-600ms) without waiting for entire 10-25 MB cluster completion.
  */
-function processAccumulator(): boolean {
+function processAccumulator(isEof = false): boolean {
   if (!transmuxer || clusterAccumulator.length === 0) return false;
 
   // 1. Locate next Cluster element if not currently in a cluster
@@ -502,8 +579,15 @@ function processAccumulator(): boolean {
   const videoTrackNum = transmuxer.getVideoTrackNumber();
   const videoBlocks = blocks.filter((b: ParsedBlock) => b.trackNumber === videoTrackNum);
 
-  // Emit fMP4 media segment as soon as we have >= 8 video blocks (~300ms) or when cluster ends
-  const shouldEmit = videoBlocks.length >= 8 || (!inCluster && videoBlocks.length > 0);
+  // Batch media segments into smooth increments (~1-2s / GOP boundaries) instead of emitting 8-frame micro-bursts,
+  // while preserving fast initial startup (<4s forward buffer) and immediate EOF flushing.
+  const forwardSec = lastEmittedPtsSec > 0 ? (lastEmittedPtsSec - currentPlayheadSec) : 0;
+  const minBlocksThreshold = (lastEmittedPtsSec === 0 || forwardSec < 4) ? 8 : 24;
+
+  const shouldEmit =
+    videoBlocks.length >= minBlocksThreshold ||
+    (!inCluster && videoBlocks.length > 0) ||
+    (isEof && videoBlocks.length > 0);
 
   if (shouldEmit) {
     const result = transmuxer.transmuxBlocks(blocks);
@@ -574,6 +658,7 @@ async function seekTo(targetTimeSec: number) {
   activeLoopId++;
   const thisLoopId = activeLoopId;
   fetcher.abortAll();
+  isBufferFull = false;
   clusterAccumulator = new Uint8Array(0);
   inCluster = false;
   currentClusterTimeMs = 0;

@@ -29,6 +29,7 @@ import { usePlayerSession } from '../hooks/usePlayerSession';
 import { fetchSubtitleContent, convertSrtToVtt } from '../../../services/telegram';
 import { PlayerTimebar } from '../../../components/PlayerTimebar';
 import type { ByteRange } from '../../../services/windowPlanner';
+import { PlayerErrorOverlay } from './PlayerErrorOverlay';
 
 export interface TMWebPlayerProps {
   item: ChannelVideoItem;
@@ -456,33 +457,20 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
         </div>
       )}
 
-      {/* Playback Error Modal */}
+      {/* Rich Player Error State UI Overlay */}
       {playbackError && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center p-6 bg-black/90 backdrop-blur-3xl z-50 text-center animate-fade-in">
-          <div className="max-w-md w-full p-8 rounded-[32px] bg-[#161618]/95 border border-white/15 shadow-[0_25px_80px_rgba(0,0,0,0.9)] space-y-5">
-            <div className="w-14 h-14 rounded-full bg-rose-500/10 text-rose-400 flex items-center justify-center mx-auto border border-rose-500/20">
-              <AlertCircle className="w-7 h-7" />
-            </div>
-            <div className="space-y-1.5">
-              <h3 className="text-xl font-bold text-white tracking-tight">Playback Interrupted</h3>
-              <p className="text-xs text-white/60 leading-relaxed">{playbackError}</p>
-            </div>
-            <div className="flex items-center justify-center gap-3 pt-2">
-              <button
-                onClick={() => actions.startPlayback(currentTime)}
-                className="px-8 py-3.5 rounded-full bg-white text-black font-semibold text-xs hover:bg-white/90 active:scale-95 shadow-lg transition-all"
-              >
-                Retry Stream
-              </button>
-              <button
-                onClick={onClose}
-                className="px-6 py-3.5 rounded-full bg-white/10 hover:bg-white/20 active:scale-95 border border-white/15 text-white/80 text-xs font-semibold transition-all"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
+        <PlayerErrorOverlay
+          media={item}
+          error={playbackError}
+          onRetry={() => actions.retry(currentTime)}
+          onClose={onClose}
+          nextEpisode={nextEpisode}
+          onPlayNext={
+            nextEpisode && onPlayNextEpisode
+              ? () => onPlayNextEpisode(nextEpisode)
+              : undefined
+          }
+        />
       )}
 
       {/* Minimal Web Player HUD */}

@@ -207,6 +207,7 @@ export interface ParsedBlock {
   relativeTime: number; // relative to cluster timecode
   isKeyframe: boolean;
   data: Uint8Array;
+  frames?: Uint8Array[]; // Unpacked laced frames
 }
 
 /**
@@ -688,14 +689,112 @@ export function parseSimpleBlock(payload: Uint8Array): ParsedBlock | null {
   const isKeyframe = (flags & 0x80) !== 0;
   const lacing = (flags & 0x06) >> 1;
 
-  // Currently handle unlaced frames (lacing === 0), which is the standard for video SimpleBlocks
-  const data = payload.subarray(offset);
+  if (lacing === 0) {
+    const data = payload.subarray(offset);
+    return {
+      trackNumber,
+      relativeTime,
+      isKeyframe,
+      data,
+      frames: [data],
+    };
+  }
+
+  // Handle Laced Frames
+  if (offset >= payload.length) return null;
+  const numFrames = payload[offset++] + 1;
+  if (numFrames === 1) {
+    const data = payload.subarray(offset);
+    return {
+      trackNumber,
+      relativeTime,
+      isKeyframe,
+      data,
+      frames: [data],
+    };
+  }
+
+  const frameSizes: number[] = new Array(numFrames);
+  let totalKnownSize = 0;
+
+  if (lacing === 1) {
+    // Xiph Lacing
+    for (let i = 0; i < numFrames - 1; i++) {
+      let sz = 0;
+      while (offset < payload.length) {
+        const val = payload[offset++];
+        sz += val;
+        if (val < 255) break;
+      }
+      frameSizes[i] = sz;
+      totalKnownSize += sz;
+    }
+  } else if (lacing === 2) {
+    // Fixed-size Lacing
+    const remaining = payload.length - offset;
+    const szPerFrame = Math.floor(remaining / numFrames);
+    for (let i = 0; i < numFrames - 1; i++) {
+      frameSizes[i] = szPerFrame;
+      totalKnownSize += szPerFrame;
+    }
+  } else if (lacing === 3) {
+    // EBML Lacing
+    const firstSz = readDataSize(payload, offset);
+    if (!firstSz || firstSz.value < 0) return null;
+    offset += firstSz.length;
+    frameSizes[0] = firstSz.value;
+    totalKnownSize = firstSz.value;
+
+    for (let i = 1; i < numFrames - 1; i++) {
+      if (offset >= payload.length) return null;
+      const fb = payload[offset];
+      if (fb === 0) return null;
+
+      let vLen = 1;
+      let vMask = 0x80;
+      while (vLen <= 8 && !(fb & vMask)) {
+        vLen++;
+        vMask >>= 1;
+      }
+      if (vLen > 8 || offset + vLen > payload.length) return null;
+
+      let rawVal = fb & (vMask - 1);
+      for (let j = 1; j < vLen; j++) {
+        rawVal = rawVal * 256 + payload[offset + j];
+      }
+      offset += vLen;
+
+      // Signed difference formula: rawVal - ((1 << (7 * vLen - 1)) - 1)
+      const bias = Math.pow(2, 7 * vLen - 1) - 1;
+      const signedDiff = rawVal - bias;
+
+      const currentSz = frameSizes[i - 1] + signedDiff;
+      if (currentSz < 0) return null;
+      frameSizes[i] = currentSz;
+      totalKnownSize += currentSz;
+    }
+  }
+
+  // Last frame takes remaining bytes
+  const lastSize = payload.length - offset - totalKnownSize;
+  if (lastSize < 0) return null;
+  frameSizes[numFrames - 1] = lastSize;
+
+  const frames: Uint8Array[] = [];
+  let dOff = offset;
+  for (let i = 0; i < numFrames; i++) {
+    const sz = frameSizes[i];
+    if (dOff + sz > payload.length) return null;
+    frames.push(payload.subarray(dOff, dOff + sz));
+    dOff += sz;
+  }
 
   return {
     trackNumber,
     relativeTime,
     isKeyframe,
-    data,
+    data: frames[0],
+    frames,
   };
 }
 
@@ -718,6 +817,9 @@ export function parseClusterPayload(
   while (offset < clusterPayload.length) {
     const el = readElementId(clusterPayload, offset);
     if (!el) break;
+    if (el.value === EBML_ID.CLUSTER) {
+      break;
+    }
     const elOffset = offset + el.length;
 
     const sz = readDataSize(clusterPayload, elOffset);
@@ -735,10 +837,22 @@ export function parseClusterPayload(
       const blockPayload = clusterPayload.subarray(dataOffset, dataOffset + sz.value);
       const parsed = parseSimpleBlock(blockPayload);
       if (parsed) {
-        blocks.push({
-          ...parsed,
-          ptsMs: clusterTimeMs + parsed.relativeTime,
-        });
+        if (parsed.frames && parsed.frames.length > 1) {
+          for (let f = 0; f < parsed.frames.length; f++) {
+            blocks.push({
+              trackNumber: parsed.trackNumber,
+              relativeTime: parsed.relativeTime,
+              isKeyframe: parsed.isKeyframe && f === 0,
+              data: parsed.frames[f],
+              ptsMs: clusterTimeMs + parsed.relativeTime + Math.round(f * 21.333),
+            });
+          }
+        } else {
+          blocks.push({
+            ...parsed,
+            ptsMs: clusterTimeMs + parsed.relativeTime,
+          });
+        }
       }
     } else if (el.value === EBML_ID.BLOCK_GROUP) {
       // Parse Block inside BlockGroup
@@ -755,10 +869,22 @@ export function parseClusterPayload(
           const blockPayload = clusterPayload.subarray(bgOff, bgOff + bgSz.value);
           const parsed = parseSimpleBlock(blockPayload);
           if (parsed) {
-            blocks.push({
-              ...parsed,
-              ptsMs: clusterTimeMs + parsed.relativeTime,
-            });
+            if (parsed.frames && parsed.frames.length > 1) {
+              for (let f = 0; f < parsed.frames.length; f++) {
+                blocks.push({
+                  trackNumber: parsed.trackNumber,
+                  relativeTime: parsed.relativeTime,
+                  isKeyframe: parsed.isKeyframe && f === 0,
+                  data: parsed.frames[f],
+                  ptsMs: clusterTimeMs + parsed.relativeTime + Math.round(f * 21.333),
+                });
+              }
+            } else {
+              blocks.push({
+                ...parsed,
+                ptsMs: clusterTimeMs + parsed.relativeTime,
+              });
+            }
           }
         }
         bgOff += bgSz.value;
@@ -775,7 +901,7 @@ export function parseClusterPayload(
  * Scans a byte buffer for the next Cluster element header (0x1F 0x43 0xB6 0x75)
  */
 export function findNextCluster(data: Uint8Array, startOffset = 0): number {
-  for (let i = startOffset; i < data.length - 4; i++) {
+  for (let i = startOffset; i <= data.length - 4; i++) {
     if (
       data[i] === 0x1f &&
       data[i + 1] === 0x43 &&

@@ -38,6 +38,7 @@ export class PlayerEngine {
   private silentAudioTimer: any = null;
   private nativeLoadedMetadataListener: (() => void) | null = null;
   private nativeErrorListener: (() => void) | null = null;
+  private mseVideoErrorListener: (() => void) | null = null;
   private isDestroyed = false;
 
   constructor(options: PlayerEngineOptions) {
@@ -46,14 +47,36 @@ export class PlayerEngine {
   }
 
   public async start(): Promise<void> {
-    const { fileName, mimeType } = this.options;
+    const { fileName, mimeType, streamId } = this.options;
     const lowerName = (fileName || '').toLowerCase();
-    this.isMkvOrTs =
+    let isMkvOrTs =
       lowerName.endsWith('.mkv') ||
       lowerName.endsWith('.avi') ||
       lowerName.endsWith('.ts') ||
+      lowerName.endsWith('.m2ts') ||
+      lowerName.endsWith('.webm') ||
       mimeType === 'video/x-matroska' ||
-      mimeType === 'video/mkv';
+      mimeType === 'video/mkv' ||
+      mimeType === 'video/mp2t' ||
+      mimeType === 'video/webm';
+
+    // Fallback signature sniff on cached chunk 0 if format is ambiguous
+    if (!isMkvOrTs && streamId) {
+      try {
+        const chunk0 = await tgStreamEngine.getChunk(streamId, 0);
+        if (chunk0 && chunk0.length >= 4) {
+          if (chunk0[0] === 0x1a && chunk0[1] === 0x45 && chunk0[2] === 0xdf && chunk0[3] === 0xa3) {
+            isMkvOrTs = true;
+          } else if (chunk0[0] === 0x47) {
+            isMkvOrTs = true;
+          }
+        }
+      } catch {
+        // Ignore sniff failure, proceed with detected flag
+      }
+    }
+
+    this.isMkvOrTs = isMkvOrTs;
 
     // Auto-select path: MKV/TS files go to MSE remuxer; MP4/WebM go to native stream
     if (this.isMkvOrTs) {
@@ -67,6 +90,7 @@ export class PlayerEngine {
 
   private startNativePath(): void {
     this.destroyNative();
+    this.destroyMse();
     this.activePath = 'native';
     this.hasTriedNative = true;
     this.options.onStatus?.('Streaming via HTTP 206 range proxy...');
@@ -111,8 +135,25 @@ export class PlayerEngine {
 
   private startMsePath(): void {
     this.destroyNative();
+    this.destroyMse();
     this.activePath = 'mse';
     this.options.onStatus?.('Transmuxing Matroska stream for MSE hardware decoding...');
+
+    // Attach native error listener on video element in MSE mode so decode faults are captured
+    this.mseVideoErrorListener = () => {
+      if (this.isDestroyed || this.activePath !== 'mse') return;
+      const mediaErr = this.video.error;
+      console.warn('MSE video element error:', mediaErr?.code, mediaErr?.message);
+      const errMsg =
+        mediaErr?.message ||
+        (mediaErr?.code === 3
+          ? 'MEDIA_ERR_DECODE: Hardware video decode error'
+          : mediaErr?.code === 4
+          ? 'MEDIA_ERR_SRC_NOT_SUPPORTED: Video format or codec not supported'
+          : 'Video decoding or playback error occurred');
+      this.options.onError?.(errMsg);
+    };
+    this.video.addEventListener('error', this.mseVideoErrorListener, { once: true });
 
     const parts = this.options.streamId.split('_');
     const chatId = parts[0];
@@ -262,14 +303,21 @@ export class PlayerEngine {
     }
   }
 
-  public destroy(): void {
-    this.isDestroyed = true;
-    this.destroyNative();
-
+  private destroyMse(): void {
+    if (this.mseVideoErrorListener) {
+      this.video.removeEventListener('error', this.mseVideoErrorListener);
+      this.mseVideoErrorListener = null;
+    }
     if (this.mseController) {
       this.mseController.destroy();
       this.mseController = null;
     }
+  }
+
+  public destroy(): void {
+    this.isDestroyed = true;
+    this.destroyNative();
+    this.destroyMse();
 
     if (this.audioCtx && this.audioCtx.state !== 'closed') {
       try {

@@ -31,6 +31,7 @@ export class MSEController {
   private isSourceOpen = false;
   private hasInitSegment = false;
   private isEvicting = false;
+  private isAudioEvicting = false;
   private evictionInterval: any = null;
   private durationSec = 0;
   private isSeeking = false;
@@ -39,6 +40,8 @@ export class MSEController {
   private pendingAudioCodec: string | null = null;
   private lastSentPlayheadTime = -1;
   private videoPlayheadListener: (() => void) | null = null;
+  private videoWaitingListener: (() => void) | null = null;
+  private isReadySignaled = false;
 
   constructor(video: HTMLVideoElement, events: MSEControllerEvents = {}) {
     this.video = video;
@@ -52,6 +55,7 @@ export class MSEController {
     mimeType = 'video/x-matroska'
   ): Promise<void> {
     this.destroy();
+    this.isReadySignaled = false;
 
     // Check MSE browser support
     if (typeof window === 'undefined' || !('MediaSource' in window)) {
@@ -121,6 +125,13 @@ export class MSEController {
     this.video.addEventListener('pause', this.videoPlayheadListener);
     this.video.addEventListener('play', this.videoPlayheadListener);
 
+    // Automatic micro-gap detection and recovery during playback stalls
+    this.videoWaitingListener = () => {
+      this.bridgeBufferGap();
+    };
+    this.video.addEventListener('waiting', this.videoWaitingListener);
+    this.video.addEventListener('stalled', this.videoWaitingListener);
+
     // Setup proactive sliding window buffer eviction every 8 seconds
     this.startEvictionLoop();
   }
@@ -158,7 +169,7 @@ export class MSEController {
         break;
 
       case 'METADATA_LOADED': {
-        const { videoCodec, durationSec, isAudioSupported, audioCodecName } = msg;
+        const { videoCodec, durationSec, isAudioSupported, audioCodec, audioCodecName } = msg;
         this.durationSec = durationSec || 0;
 
         if (this.durationSec > 0 && this.mediaSource && this.mediaSource.readyState === 'open') {
@@ -170,18 +181,22 @@ export class MSEController {
         }
 
         if (isAudioSupported) {
-          this.initAudioSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
-        } else if (audioCodecName && audioCodecName !== 'None') {
-          if (MediaSource.isTypeSupported('audio/mp4; codecs="ac-3"')) {
-            this.initAudioSourceBuffer('audio/mp4; codecs="ac-3"');
+          const candidateAudioCodec = audioCodec || 'audio/mp4; codecs="mp4a.40.2"';
+          if (MediaSource.isTypeSupported(candidateAudioCodec)) {
+            this.initAudioSourceBuffer(candidateAudioCodec);
           } else {
-            this.events.onAudioUnsupported?.(audioCodecName);
+            console.warn('Browser MediaSource does not support audio codec:', candidateAudioCodec);
+            this.events.onAudioUnsupported?.(audioCodecName || 'AAC');
           }
+        } else if (audioCodecName && audioCodecName !== 'None') {
+          // Track exists in container (e.g. AC-3, E-AC-3, DTS) but transmuxer cannot package it.
+          // Omit audio SourceBuffer to prevent readyState deadlock; notify UI for user toast.
+          this.events.onAudioUnsupported?.(audioCodecName);
         }
 
         // Initialize Video SourceBuffer if not yet created
         this.initSourceBuffer(videoCodec);
-        this.events.onReady?.(this.durationSec);
+        // onReady is deferred until SourceBuffer successfully appends initial media segment
         break;
       }
 
@@ -312,6 +327,7 @@ export class MSEController {
 
       this.sourceBuffer.addEventListener('updateend', () => {
         this.flushQueue();
+        this.checkReady();
       });
 
       this.sourceBuffer.addEventListener('error', (e) => {
@@ -343,6 +359,7 @@ export class MSEController {
 
       this.audioSourceBuffer.addEventListener('updateend', () => {
         this.flushAudioQueue();
+        this.checkReady();
       });
 
       this.audioSourceBuffer.addEventListener('error', (e) => {
@@ -353,7 +370,12 @@ export class MSEController {
     }
   }
 
+  public hasAudioTrack(): boolean {
+    return this.audioSourceBuffer !== null;
+  }
+
   private enqueueAudioSegment(buf: ArrayBuffer, isPriority = false): void {
+    if (!this.audioSourceBuffer) return; // Defensive guard: discard if no audio buffer exists
     if (isPriority) {
       this.audioQueue.unshift(buf);
     } else {
@@ -372,6 +394,8 @@ export class MSEController {
         this.audioSourceBuffer.appendBuffer(nextSegment);
       } catch (err: any) {
         if (err.name === 'QuotaExceededError') {
+          console.warn('Audio QuotaExceededError: aggressively evicting older buffer segments...');
+          this.evictOldBuffers(true);
           this.audioQueue.unshift(nextSegment);
         } else {
           console.warn('Failed to append audio buffer:', err);
@@ -400,7 +424,7 @@ export class MSEController {
       } catch (err: any) {
         if (err.name === 'QuotaExceededError') {
           console.warn('QuotaExceededError: aggressively evicting older buffer segments...');
-          this.evictBuffer(true);
+          this.evictOldBuffers(true);
           // Re-queue segment to retry after eviction
           this.segmentQueue.unshift(nextSegment);
         } else {
@@ -475,12 +499,12 @@ export class MSEController {
 
   /**
    * Proactive sliding window buffer eviction:
-   * Keeps buffer memory < 80MB by removing already-played content older than 30 seconds.
+   * Keeps buffer memory < 80MB by removing already-played content older than 15-20 seconds.
    */
   private startEvictionLoop(): void {
     this.stopEvictionLoop();
     this.evictionInterval = setInterval(() => {
-      this.evictBuffer(false);
+      this.evictOldBuffers(false);
     }, 8000);
   }
 
@@ -491,32 +515,118 @@ export class MSEController {
     }
   }
 
-  private evictBuffer(forceAggressive = false): void {
-    if (
-      !this.sourceBuffer ||
-      this.sourceBuffer.updating ||
-      this.isEvicting ||
-      !this.isSourceOpen
-    ) {
-      return;
-    }
+  /**
+   * Symmetric sliding window buffer eviction:
+   * Keeps buffer memory bounded by removing played video and audio content behind the playhead (keeping 15-20s behind).
+   * Completely eliminates audio and video QuotaExceededError during continuous playback.
+   */
+  public evictOldBuffers(forceAggressive = false): void {
+    if (!this.isSourceOpen) return;
 
     const currentPos = this.video.currentTime;
-    const retainBehindSec = forceAggressive ? 10 : 30;
+    const retainBehindSec = forceAggressive ? 10 : 20;
 
     if (currentPos > retainBehindSec) {
       const removeEnd = currentPos - retainBehindSec;
-      try {
-        this.isEvicting = true;
-        this.sourceBuffer.remove(0, removeEnd);
-        const onEvictEnd = () => {
+
+      // Symmetric eviction: Video SourceBuffer
+      if (
+        this.sourceBuffer &&
+        !this.sourceBuffer.updating &&
+        !this.isEvicting
+      ) {
+        try {
+          this.isEvicting = true;
+          this.sourceBuffer.remove(0, removeEnd);
+          const onEvictEnd = () => {
+            this.isEvicting = false;
+            this.sourceBuffer?.removeEventListener('updateend', onEvictEnd);
+            this.flushQueue();
+          };
+          this.sourceBuffer.addEventListener('updateend', onEvictEnd, { once: true });
+        } catch (e) {
           this.isEvicting = false;
-          this.sourceBuffer?.removeEventListener('updateend', onEvictEnd);
-          this.flushQueue();
-        };
-        this.sourceBuffer.addEventListener('updateend', onEvictEnd, { once: true });
-      } catch (e) {
-        this.isEvicting = false;
+        }
+      }
+
+      // Symmetric eviction: Audio SourceBuffer
+      if (
+        this.audioSourceBuffer &&
+        !this.audioSourceBuffer.updating &&
+        !this.isAudioEvicting
+      ) {
+        try {
+          this.isAudioEvicting = true;
+          this.audioSourceBuffer.remove(0, removeEnd);
+          const onAudioEvictEnd = () => {
+            this.isAudioEvicting = false;
+            this.audioSourceBuffer?.removeEventListener('updateend', onAudioEvictEnd);
+            this.flushAudioQueue();
+          };
+          this.audioSourceBuffer.addEventListener('updateend', onAudioEvictEnd, { once: true });
+        } catch (e) {
+          this.isAudioEvicting = false;
+        }
+      }
+    }
+  }
+
+  public evictBuffer(forceAggressive = false): void {
+    this.evictOldBuffers(forceAggressive);
+  }
+
+  /**
+   * Check if media segments are buffered and signal onReady once.
+   * Bridges initial PTS gap if playhead is stuck behind buffered start (e.g. B-frame delay).
+   */
+  private checkReady(): void {
+    if (this.isReadySignaled || !this.isSourceOpen) return;
+    if (!this.video || !this.sourceBuffer) return;
+
+    // W3C: video.buffered has valid range only when all active SourceBuffers have data at that range
+    if (this.video.buffered && this.video.buffered.length > 0) {
+      const startPts = this.video.buffered.start(0);
+
+      // Bridge initial PTS gap if playhead is stuck behind buffered start
+      if (this.video.currentTime < startPts) {
+        try {
+          this.video.currentTime = startPts;
+        } catch (e) {
+          console.warn('Failed to bridge initial PTS gap:', e);
+        }
+      }
+
+      this.isReadySignaled = true;
+      this.events.onReady?.(this.durationSec);
+    }
+  }
+
+  /**
+   * Micro-gap jumper to recover from sub-frame stalls (<150ms) across cluster boundaries
+   */
+  public bridgeBufferGap(): void {
+    if (!this.video || !this.video.buffered || this.video.buffered.length === 0) return;
+    const ct = this.video.currentTime;
+    for (let i = 0; i < this.video.buffered.length; i++) {
+      const start = this.video.buffered.start(i);
+      // Case 1: Playhead is behind start of buffered range by < 0.15s
+      if (ct < start && (start - ct) < 0.15) {
+        try {
+          this.video.currentTime = start;
+        } catch (e) {}
+        return;
+      }
+      // Case 2: Playhead is at the end of range i, and next range (i + 1) starts within 0.15s
+      const end = this.video.buffered.end(i);
+      if (i + 1 < this.video.buffered.length) {
+        const nextStart = this.video.buffered.start(i + 1);
+        const gap = nextStart - end;
+        if (gap > 0 && gap < 0.15 && ct >= end - 0.05 && ct <= nextStart) {
+          try {
+            this.video.currentTime = nextStart;
+          } catch (e) {}
+          return;
+        }
       }
     }
   }
@@ -529,10 +639,19 @@ export class MSEController {
       this.videoPlayheadListener = null;
     }
 
+    if (this.videoWaitingListener) {
+      this.video.removeEventListener('waiting', this.videoWaitingListener);
+      this.video.removeEventListener('stalled', this.videoWaitingListener);
+      this.videoWaitingListener = null;
+    }
+    this.isEvicting = false;
+    this.isAudioEvicting = false;
+
     this.stopEvictionLoop();
     this.segmentQueue = [];
     this.audioQueue = [];
     this.isSeeking = false;
+    this.isReadySignaled = false;
     this.pendingSeekTarget = null;
     this.pendingVideoCodec = null;
     this.pendingAudioCodec = null;

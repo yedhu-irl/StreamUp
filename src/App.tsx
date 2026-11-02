@@ -275,11 +275,11 @@ export function App() {
       const showItem: ChannelVideoItem = {
         ...firstEp,
         id: `series_show_${encodeURIComponent(showKey)}`,
-        fileName: grp.showTitle,
+        fileName: firstEp.fileName || firstEp.parsed?.originalFileName || `${grp.showTitle}.mkv`,
         parsed: {
           ...firstEp.parsed,
           cleanTitle: grp.showTitle,
-          originalFileName: grp.showTitle,
+          originalFileName: firstEp.parsed?.originalFileName || firstEp.fileName,
           isSeries: true,
           season: 1,
           episode: 1,

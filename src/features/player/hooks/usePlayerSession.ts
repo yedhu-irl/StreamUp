@@ -137,6 +137,70 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
     [fileId, initialTime, fileName, mimeType, fileSize, metadata, autoPlay]
   );
 
+  // ────────────────────────────────────────────
+  // Stream Retry Action
+  // ────────────────────────────────────────────
+  const handleRetry = useCallback(
+    async (fromTime?: number) => {
+      const resumePos =
+        typeof fromTime === 'number'
+          ? fromTime
+          : (videoRef.current?.currentTime ?? currentTime ?? initialTime);
+
+      setPlaybackError(null);
+      setIsBuffering(true);
+      setIsStalled(false);
+      setPlaybackStatus('Reconnecting stream proxy...');
+
+      // 1. Clean up previous engine
+      if (playerEngineRef.current) {
+        playerEngineRef.current.destroy();
+        playerEngineRef.current = null;
+      }
+
+      // 2. Reset buffer state in stream engine around current resume point
+      try {
+        tgStreamEngine.recenterRingBuffer(fileId, resumePos, duration || 0);
+      } catch (e) {
+        console.warn('Error resetting stream engine buffer:', e);
+      }
+
+      // 3. Restart playback at resume point
+      await startPlayback(resumePos);
+    },
+    [fileId, currentTime, initialTime, duration, startPlayback]
+  );
+
+  // ────────────────────────────────────────────
+  // Fatal Stall Watchdog (>20s unrecoverable stall while in PLAYING state)
+  // ────────────────────────────────────────────
+  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (isPlaying && (isStalled || isBuffering)) {
+      if (!stallTimerRef.current) {
+        stallTimerRef.current = setTimeout(() => {
+          if (isPlaying && (isStalled || isBuffering)) {
+            setPlaybackError('Stream playback stalled (>20s): interrupted data stream');
+            setIsBuffering(false);
+          }
+        }, 20000);
+      }
+    } else {
+      if (stallTimerRef.current) {
+        clearTimeout(stallTimerRef.current);
+        stallTimerRef.current = null;
+      }
+    }
+
+    return () => {
+      if (stallTimerRef.current) {
+        clearTimeout(stallTimerRef.current);
+        stallTimerRef.current = null;
+      }
+    };
+  }, [isPlaying, isStalled, isBuffering]);
+
   // Initialize engine on video element mount
   useEffect(() => {
     let isMounted = true;
@@ -312,6 +376,26 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
     resumeStore.savePlaybackPosition(fileId, 0, duration, true);
   }, [fileId, duration]);
 
+  const onError = useCallback((e: any) => {
+    const v = videoRef.current;
+    const mediaErr = v?.error;
+    const errMsg =
+      mediaErr?.message ||
+      (mediaErr?.code === 3
+        ? 'MEDIA_ERR_DECODE: Hardware video decode error'
+        : mediaErr?.code === 4
+        ? 'MEDIA_ERR_SRC_NOT_SUPPORTED: Video format or codec not supported'
+        : mediaErr?.code === 2
+        ? 'MEDIA_ERR_NETWORK: Network connection error'
+        : 'Video decoding or playback error occurred on media element');
+    setPlaybackError(errMsg);
+    setIsBuffering(false);
+  }, []);
+
+  const onStalled = useCallback(() => {
+    setIsStalled(true);
+  }, []);
+
   return {
     videoRef,
     state: {
@@ -335,6 +419,8 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       skipRelative,
       resume,
       startPlayback,
+      handleRetry,
+      retry: handleRetry,
       savePlaybackPosition: (sec: number) => resumeStore.savePlaybackPosition(fileId, sec, duration),
       loadPlaybackPosition: () => resumeStore.loadPlaybackPosition(fileId),
       getFileMetadata: () => fileStreamService.getFileMetadata(fileId),
@@ -348,6 +434,8 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       onPlaying,
       onPause,
       onEnded,
+      onError,
+      onStalled,
     },
   };
 }
