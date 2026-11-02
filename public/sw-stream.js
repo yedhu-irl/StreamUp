@@ -111,6 +111,30 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
+  // TMPlayer API: GET /api/files/:id (Metadata Contract)
+  const metaMatch = url.pathname.match(/^\/api\/files\/([^/]+)$/);
+  if (metaMatch) {
+    const streamId = decodeURIComponent(metaMatch[1]);
+    event.respondWith(handleFileMetadataRequest(streamId));
+    return;
+  }
+
+  // TMPlayer API: GET /api/files/:id/stream (HTTP 206 Range Stream)
+  const fileStreamMatch = url.pathname.match(/^\/api\/files\/([^/]+)\/stream$/);
+  if (fileStreamMatch) {
+    const streamId = decodeURIComponent(fileStreamMatch[1]);
+    event.respondWith(handleStreamRequest(event.request, streamId));
+    return;
+  }
+
+  // Range Proxy route: /api/stream/:streamId
+  const apiStreamMatch = url.pathname.match(/^\/api\/stream\/([^/]+)/);
+  if (apiStreamMatch) {
+    const streamId = decodeURIComponent(apiStreamMatch[1]);
+    event.respondWith(handleStreamRequest(event.request, streamId));
+    return;
+  }
+
   // Range Proxy route: /tg-stream/:streamId
   const match = url.pathname.match(/^\/tg-stream\/([^/]+)/);
   if (match) {
@@ -127,6 +151,37 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 });
+
+async function handleFileMetadataRequest(streamId) {
+  let descriptor = await getStreamDescriptorFromIndexedDB(streamId);
+  if (!descriptor || !descriptor.totalSize) {
+    descriptor = await requestDescriptorFromMainThread(streamId);
+  }
+  if (!descriptor) {
+    return new Response(JSON.stringify({ error: 'File metadata not found' }), {
+      status: 404,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  const payload = {
+    id: descriptor.streamId,
+    name: descriptor.fileName || 'media',
+    mimeType: descriptor.mimeType || 'video/mp4',
+    size: descriptor.totalSize || 0,
+    duration: descriptor.duration || 0,
+    streamUrl: `/api/files/${encodeURIComponent(descriptor.streamId)}/stream`,
+  };
+
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: {
+      'Content-Type': 'application/json',
+      'Cache-Control': 'no-store, no-cache',
+      'Access-Control-Allow-Origin': self.location.origin,
+    },
+  });
+}
 
 async function requestDescriptorFromMainThread(streamId, timeoutMs = 8000) {
   const requestId = `desc_${Date.now()}_${Math.random().toString(36).slice(2)}`;
@@ -151,6 +206,9 @@ async function handleStreamRequest(request, streamId) {
 
   const { totalSize, mimeType } = descriptor;
   const rangeHeader = request.headers.get('Range');
+  const reqUrl = new URL(request.url);
+  const qOffset = reqUrl.searchParams.get('offset');
+  const qLimit = reqUrl.searchParams.get('limit');
 
   let start = 0;
   let end = totalSize - 1;
@@ -165,6 +223,13 @@ async function handleStreamRequest(request, streamId) {
         // Cap open-ended range to 2 MB window
         end = Math.min(start + MAX_RANGE_WINDOW - 1, totalSize - 1);
       }
+    }
+  } else if (qOffset !== null) {
+    start = parseInt(qOffset, 10) || 0;
+    if (qLimit !== null) {
+      end = Math.min(start + parseInt(qLimit, 10) - 1, totalSize - 1);
+    } else {
+      end = Math.min(start + MAX_RANGE_WINDOW - 1, totalSize - 1);
     }
   } else {
     // No range header: serve first 512 KB
