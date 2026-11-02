@@ -60,9 +60,9 @@ export function App() {
   const [playerInitialTime, setPlayerInitialTime] = useState<number>(0);
 
   const handleInitiatePlay = (item: ChannelVideoItem, initialTime = 0) => {
-    setActivePlayingItem(item);
-    setPlayerInitialTime(initialTime);
-    setStagingMediaItem(null);
+    setStagingMediaItem(item);
+    setStagingInitialTime(initialTime);
+    setActivePlayingItem(null);
   };
 
   // Data States

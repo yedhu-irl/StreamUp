@@ -100,12 +100,22 @@ export function planSymmetricRingBuffer(
   }
 
   const currentChunk = Math.floor(currentByte / CHUNK_SIZE);
-  // 30s window calculation (total 1 minute)
-  const ringBytes = Math.max(6 * 1024 * 1024, Math.min(25 * 1024 * 1024, Math.ceil(30 * bytesPerSec)));
-  const ringChunks = Math.max(3, Math.ceil(ringBytes / CHUNK_SIZE));
+  let startChunk = 0;
+  let endChunk = 0;
 
-  const startChunk = Math.max(0, currentChunk - ringChunks);
-  const endChunk = Math.min(totalChunks - 1, currentChunk + ringChunks);
+  if (currentTimeSec <= 30) {
+    // Initial 0..30s playback: buffer full 60 seconds forward (1 full minute)
+    const ringBytes = Math.max(12 * 1024 * 1024, Math.min(50 * 1024 * 1024, Math.ceil(60 * bytesPerSec)));
+    const forwardChunks = Math.max(12, Math.ceil(ringBytes / CHUNK_SIZE));
+    startChunk = 0;
+    endChunk = Math.min(totalChunks - 1, currentChunk + forwardChunks);
+  } else {
+    // Resumed / mid-video playback: symmetric 30s backward + 30s forward (1 full minute total)
+    const ringBytes = Math.max(6 * 1024 * 1024, Math.min(25 * 1024 * 1024, Math.ceil(30 * bytesPerSec)));
+    const ringChunks = Math.max(3, Math.ceil(ringBytes / CHUNK_SIZE));
+    startChunk = Math.max(0, currentChunk - ringChunks);
+    endChunk = Math.min(totalChunks - 1, currentChunk + ringChunks);
+  }
 
   // Pinned chunks: first 2 chunks (container header) and last 2 chunks (moov/Cues)
   const pinnedChunks: number[] = [0];
@@ -113,13 +123,19 @@ export function planSymmetricRingBuffer(
   if (totalChunks > 2) pinnedChunks.push(totalChunks - 1);
   if (totalChunks > 3) pinnedChunks.push(totalChunks - 2);
 
-  // Chunks to preload prioritizes current -> forward 30s -> backward 30s
+  // Chunks to preload: container header first -> playhead forward -> backward 30s -> tail
   const chunksToPreload: number[] = [];
+  for (const p of pinnedChunks.slice(0, 2)) {
+    if (!chunksToPreload.includes(p)) chunksToPreload.push(p);
+  }
   for (let c = currentChunk; c <= endChunk; c++) {
-    chunksToPreload.push(c);
+    if (!chunksToPreload.includes(c)) chunksToPreload.push(c);
   }
   for (let c = currentChunk - 1; c >= startChunk; c--) {
-    chunksToPreload.push(c);
+    if (!chunksToPreload.includes(c)) chunksToPreload.push(c);
+  }
+  for (const p of pinnedChunks.slice(2)) {
+    if (!chunksToPreload.includes(p)) chunksToPreload.push(p);
   }
 
   return {

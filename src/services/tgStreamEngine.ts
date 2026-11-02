@@ -561,15 +561,15 @@ export class TgStreamEngine {
   }
 
   /**
-   * Fast-Start Pre-roll Buffer:
-   * Loads container header (chunks 0..1) + nimble 3-chunk playhead burst (~1.5 MB).
-   * Starts playback in 1-2 seconds even on slow internet, then streams the remaining forward 30s in the background.
+   * 1-Minute Pre-Roll Staging Buffer:
+   * Buffers the exact 1-minute window [T-30s, T+30s] (or 0..60s for fresh play) + container headers.
+   * Enables instant start with zero in-player stalls. Supports adaptive early start after 50%.
    */
   public async preloadInitialBuffer(
     streamId: string,
     initialTimeSec: number = 0,
     durationSec: number = 0,
-    onProgress?: (percent: number, speedBytesPerSec: number, status: string) => void
+    onProgress?: (percent: number, speedBytesPerSec: number, status: string, canStartEarly: boolean) => void
   ): Promise<void> {
     if (!this.activeStream || this.activeStream.streamId !== streamId) {
       const desc = await streamDb.streamDescriptors.get(streamId);
@@ -581,41 +581,37 @@ export class TgStreamEngine {
     const totalSize = this.activeStream?.totalSize || 0;
     const plan = planSymmetricRingBuffer(initialTimeSec, durationSec, totalSize);
 
-    // Fast-Start targets:
-    // 1. Pinned headers: chunks 0..1
-    // 2. Playhead burst: up to 3 chunks around current playhead
-    const headerChunks = plan.pinnedChunks.slice(0, 2);
-    const playheadBurst: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      const c = plan.currentChunk + i;
-      if (c < (this.activeStream?.totalChunks || 1) && !headerChunks.includes(c)) {
-        playheadBurst.push(c);
-      }
-    }
+    // 1-minute window targets
+    const targetChunks = plan.chunksToPreload;
+    const totalToLoad = Math.max(1, targetChunks.length);
+    let completedCount = targetChunks.filter((c) => this.downloadedChunksSet.has(c)).length;
 
-    const fastStartChunks = Array.from(new Set([...headerChunks, ...playheadBurst]));
-    const totalToLoad = Math.max(1, fastStartChunks.length);
-
-    onProgress?.(10, 0, 'Connecting to Telegram MTProto...');
+    onProgress?.(
+      Math.min(100, Math.round((completedCount / totalToLoad) * 100)),
+      0,
+      'Connecting to Telegram cloud...',
+      completedCount / totalToLoad >= 0.5
+    );
 
     await this.fetchChunksConcurrently(
       streamId,
-      fastStartChunks,
-      3,
-      (_chunkIdx, completedCount) => {
+      targetChunks,
+      4,
+      (_chunkIdx, count) => {
+        completedCount = count;
         const pct = Math.min(100, Math.round((completedCount / totalToLoad) * 100));
         const lastSpeed = this.getCurrentSpeed();
-        onProgress?.(pct, lastSpeed, `Buffering initial burst (${pct}%)...`);
+        const canStartEarly = pct >= 50;
+        onProgress?.(
+          pct,
+          lastSpeed,
+          pct < 100 ? `Buffering 1-minute playback window (${pct}%)...` : 'Playback ready',
+          canStartEarly
+        );
       }
     );
 
-    onProgress?.(100, this.getCurrentSpeed(), 'Playback ready');
-
-    // Asynchronously prefetch remaining 30s forward chunks in background without blocking player launch
-    const backgroundTargets = plan.chunksToPreload.slice(0, 8).filter((c) => !this.downloadedChunksSet.has(c));
-    if (backgroundTargets.length > 0) {
-      this.fetchChunksConcurrently(streamId, backgroundTargets, 2).catch(() => {});
-    }
+    onProgress?.(100, this.getCurrentSpeed(), 'Playback ready', true);
   }
 
   public getCurrentSpeed(): number {

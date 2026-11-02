@@ -665,9 +665,13 @@ export const Player: React.FC<PlayerProps> = ({
         className="hidden"
       />
 
-      {/* Subtle Corner Loading & Transfer Speed Badge (No screen blur!) */}
+      {/* Subtle Corner Loading & Transfer Speed Badge (Left corner, no screen blur) */}
       {isBuffering && !playbackError && (
-        <div className="absolute top-6 right-6 z-40 flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-black/75 border border-white/15 backdrop-blur-md text-xs font-mono text-white shadow-xl animate-fade-in pointer-events-none">
+        <div
+          className={`absolute z-40 flex items-center space-x-2 px-3.5 py-1.5 rounded-full bg-black/75 border border-white/15 backdrop-blur-md text-xs font-mono text-white shadow-xl animate-fade-in pointer-events-none transition-all duration-300 ${
+            showControls ? 'top-20 left-6 md:left-8' : 'top-6 left-6 md:left-8'
+          }`}
+        >
           <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400 shrink-0" />
           <span>{playbackStatus || 'Buffering'}</span>
           <span className="text-white/30">&bull;</span>
