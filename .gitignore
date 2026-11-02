@@ -20,12 +20,17 @@ tmp/
 *.tmp
 *.log
 
-# Agent / Skill configs & metadata
+# Agent / Skill configs, discussion & metadata
 .impeccable/
 apple-design-skill.md
 .gemini/
 .claude/
 .agents/
+PROJECT.md
+TEST_INFRA.md
+TEST_READY.md
+ORIGINAL_REQUEST.md
+*.agent.md
 
 # IDE & OS files
 .vscode/
