@@ -20,6 +20,7 @@ import {
   type MatroskaMetadata,
   type VideoTrack,
   type AudioTrack,
+  type ParsedBlock,
 } from './ebml.ts';
 
 export interface TransmuxResult {
@@ -208,6 +209,14 @@ export class MatroskaTransmuxer {
     }
   }
 
+  public getVideoTrackNumber(): number {
+    return this.videoTrack?.trackNumber || 1;
+  }
+
+  public getAudioTrackNumber(): number | undefined {
+    return this.audioTrack?.trackNumber;
+  }
+
   /**
    * Transmuxes a Matroska Cluster element payload into an fMP4 media segment.
    */
@@ -215,7 +224,15 @@ export class MatroskaTransmuxer {
     if (!this.videoTrack) return null;
 
     const { blocks } = parseClusterPayload(clusterPayload);
-    if (blocks.length === 0) return null;
+    return this.transmuxBlocks(blocks);
+  }
+
+  /**
+   * Transmuxes parsed Matroska blocks into an fMP4 media segment.
+   * Enables fine-grained streaming of sub-cluster blocks without waiting for full cluster download.
+   */
+  public transmuxBlocks(blocks: (ParsedBlock & { ptsMs: number })[]): TransmuxResult | null {
+    if (!this.videoTrack || blocks.length === 0) return null;
 
     // Filter to video track blocks
     let videoBlocks = blocks.filter((b) => b.trackNumber === this.videoTrack!.trackNumber);
@@ -224,7 +241,7 @@ export class MatroskaTransmuxer {
     if (this.waitingForKeyframe) {
       const firstKeyIdx = videoBlocks.findIndex((b) => b.isKeyframe);
       if (firstKeyIdx === -1) {
-        // Discard cluster with no keyframe after seek
+        // Discard blocks with no keyframe after seek
         return null;
       }
       videoBlocks = videoBlocks.slice(firstKeyIdx);

@@ -700,33 +700,39 @@ export function parseSimpleBlock(payload: Uint8Array): ParsedBlock | null {
 }
 
 /**
- * Parses all media blocks and the cluster timestamp from a Matroska Cluster element payload
+ * Parses all media blocks and the cluster timestamp from a Matroska Cluster element payload.
+ * Supports partial payload parsing and returns bytesConsumed.
  */
-export function parseClusterPayload(clusterPayload: Uint8Array): {
+export function parseClusterPayload(
+  clusterPayload: Uint8Array,
+  initialClusterTimeMs = 0
+): {
   clusterTimeMs: number;
   blocks: (ParsedBlock & { ptsMs: number })[];
+  bytesConsumed: number;
 } {
   let offset = 0;
-  let clusterTimeMs = 0;
+  let clusterTimeMs = initialClusterTimeMs;
   const blocks: (ParsedBlock & { ptsMs: number })[] = [];
 
   while (offset < clusterPayload.length) {
     const el = readElementId(clusterPayload, offset);
     if (!el) break;
-    offset += el.length;
+    const elOffset = offset + el.length;
 
-    const sz = readDataSize(clusterPayload, offset);
+    const sz = readDataSize(clusterPayload, elOffset);
     if (!sz) break;
-    offset += sz.length;
+    const dataOffset = elOffset + sz.length;
 
-    if (sz.value < 0 || offset + sz.value > clusterPayload.length) {
+    if (sz.value < 0 || dataOffset + sz.value > clusterPayload.length) {
+      // Incomplete element: stop here, bytesConsumed is up to the start of this element
       break;
     }
 
     if (el.value === EBML_ID.TIME_CODE) {
-      clusterTimeMs = readUint(clusterPayload, offset, sz.value);
+      clusterTimeMs = readUint(clusterPayload, dataOffset, sz.value);
     } else if (el.value === EBML_ID.SIMPLE_BLOCK) {
-      const blockPayload = clusterPayload.subarray(offset, offset + sz.value);
+      const blockPayload = clusterPayload.subarray(dataOffset, dataOffset + sz.value);
       const parsed = parseSimpleBlock(blockPayload);
       if (parsed) {
         blocks.push({
@@ -736,8 +742,8 @@ export function parseClusterPayload(clusterPayload: Uint8Array): {
       }
     } else if (el.value === EBML_ID.BLOCK_GROUP) {
       // Parse Block inside BlockGroup
-      let bgOff = offset;
-      const bgEnd = offset + sz.value;
+      let bgOff = dataOffset;
+      const bgEnd = dataOffset + sz.value;
       while (bgOff < bgEnd) {
         const bgEl = readElementId(clusterPayload, bgOff);
         if (!bgEl) break;
@@ -759,10 +765,10 @@ export function parseClusterPayload(clusterPayload: Uint8Array): {
       }
     }
 
-    offset += sz.value;
+    offset = dataOffset + sz.value;
   }
 
-  return { clusterTimeMs, blocks };
+  return { clusterTimeMs, blocks, bytesConsumed: offset };
 }
 
 /**

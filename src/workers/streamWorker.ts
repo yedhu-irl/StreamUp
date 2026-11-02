@@ -10,9 +10,11 @@ import {
   findNextCluster,
   readElementId,
   readDataSize,
+  parseClusterPayload,
   EBML_ID,
   type MatroskaMetadata,
   type CueEntry,
+  type ParsedBlock,
 } from '../services/remuxer/ebml.ts';
 import { MatroskaTransmuxer } from '../services/remuxer/transmuxer.ts';
 
@@ -31,36 +33,53 @@ interface FetchRequestRecord {
   timer: any;
 }
 
-async function getChunkFromIndexedDB(streamId: string, chunkIndex: number): Promise<ArrayBuffer | null> {
+let cachedWorkerDb: IDBDatabase | null = null;
+
+async function getWorkerDb(): Promise<IDBDatabase | null> {
   if (typeof indexedDB === 'undefined') return null;
+  if (cachedWorkerDb) return cachedWorkerDb;
+
   return new Promise((resolve) => {
     try {
       const req = indexedDB.open('StreamUpMediaDB', 1);
       req.onsuccess = () => {
-        const db = req.result;
-        if (!db.objectStoreNames.contains('videoChunks')) {
-          db.close();
-          return resolve(null);
-        }
-        const tx = db.transaction('videoChunks', 'readonly');
-        const store = tx.objectStore('videoChunks');
-        const getReq = store.get(`${streamId}_${chunkIndex}`);
-        getReq.onsuccess = () => {
-          db.close();
-          if (getReq.result && getReq.result.data) {
-            const u8 = getReq.result.data;
-            const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
-            resolve(ab);
-          } else {
-            resolve(null);
-          }
+        cachedWorkerDb = req.result;
+        cachedWorkerDb.onversionchange = () => {
+          cachedWorkerDb?.close();
+          cachedWorkerDb = null;
         };
-        getReq.onerror = () => {
-          db.close();
-          resolve(null);
+        cachedWorkerDb.onerror = () => {
+          cachedWorkerDb?.close();
+          cachedWorkerDb = null;
         };
+        resolve(cachedWorkerDb);
       };
       req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+async function getChunkFromIndexedDB(streamId: string, chunkIndex: number): Promise<ArrayBuffer | null> {
+  const db = await getWorkerDb();
+  if (!db || !db.objectStoreNames.contains('videoChunks')) return null;
+
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction('videoChunks', 'readonly');
+      const store = tx.objectStore('videoChunks');
+      const getReq = store.get(`${streamId}_${chunkIndex}`);
+      getReq.onsuccess = () => {
+        if (getReq.result && getReq.result.data) {
+          const u8 = getReq.result.data;
+          const ab = u8.buffer.slice(u8.byteOffset, u8.byteOffset + u8.byteLength);
+          resolve(ab);
+        } else {
+          resolve(null);
+        }
+      };
+      getReq.onerror = () => resolve(null);
     } catch (e) {
       resolve(null);
     }
@@ -220,6 +239,11 @@ let currentPlayheadSec = 0;
 let lastEmittedPtsSec = 0;
 let isVideoPaused = false;
 
+// Sub-cluster streaming parser state
+let inCluster = false;
+let currentClusterTimeMs = 0;
+let clusterPayloadRemaining = -1;
+
 // Residual byte buffer for incomplete clusters across chunk boundaries
 let clusterAccumulator: Uint8Array = new Uint8Array(0);
 
@@ -241,6 +265,9 @@ async function startStream(
   downloadWindow = new DownloadWindow(fileSize);
   currentReadOffset = 0;
   clusterAccumulator = new Uint8Array(0);
+  inCluster = false;
+  currentClusterTimeMs = 0;
+  clusterPayloadRemaining = -1;
 
   try {
     postWorkerMessage({ type: 'STATUS', status: 'Fetching container header...' });
@@ -411,103 +438,131 @@ async function runStreamLoop(loopId: number) {
 }
 
 /**
- * Inspects clusterAccumulator. If a full Cluster is present, transmuxes it and emits MEDIA_SEGMENT
+ * Inspects clusterAccumulator. Parses and transmuxes media blocks incrementally in sub-clusters.
+ * Emits MEDIA_SEGMENT every ~8-15 blocks (~300-600ms) without waiting for entire 10-25 MB cluster completion.
  */
 function processAccumulator(): boolean {
-  if (!transmuxer || clusterAccumulator.length < 12) return false;
+  if (!transmuxer || clusterAccumulator.length === 0) return false;
 
-  // Find cluster element
-  let clusterStart = 0;
-  const el = readElementId(clusterAccumulator, clusterStart);
-  if (!el || el.value !== EBML_ID.CLUSTER) {
-    // Search forward for cluster ID
-    const nextIdx = findNextCluster(clusterAccumulator, 1);
-    if (nextIdx === -1) {
-      return false;
+  // 1. Locate next Cluster element if not currently in a cluster
+  if (!inCluster) {
+    if (clusterAccumulator.length < 12) return false;
+
+    let clusterStart = 0;
+    const el = readElementId(clusterAccumulator, clusterStart);
+    if (!el || el.value !== EBML_ID.CLUSTER) {
+      const nextIdx = findNextCluster(clusterAccumulator, 0);
+      if (nextIdx === -1) {
+        // Discard prefix bytes, keep trailing 3 for boundary detection
+        if (clusterAccumulator.length > 3) {
+          clusterAccumulator = clusterAccumulator.slice(clusterAccumulator.length - 3);
+        }
+        return false;
+      }
+      clusterStart = nextIdx;
     }
-    clusterStart = nextIdx;
+
+    const elHeader = readElementId(clusterAccumulator, clusterStart);
+    if (!elHeader) return false;
+
+    const sz = readDataSize(clusterAccumulator, clusterStart + elHeader.length);
+    if (!sz) return false;
+
+    const payloadStart = clusterStart + elHeader.length + sz.length;
+    clusterAccumulator = clusterAccumulator.slice(payloadStart);
+    inCluster = true;
+    currentClusterTimeMs = 0;
+    clusterPayloadRemaining = sz.value >= 0 ? sz.value : -1;
   }
 
-  const elHeader = readElementId(clusterAccumulator, clusterStart);
-  if (!elHeader) return false;
-
-  const sz = readDataSize(clusterAccumulator, clusterStart + elHeader.length);
-  if (!sz) return false;
-
-  const payloadStart = clusterStart + elHeader.length + sz.length;
-  let payloadEnd: number;
-
-  if (sz.value >= 0) {
-    // Known size
-    payloadEnd = payloadStart + sz.value;
-    if (clusterAccumulator.length < payloadEnd) {
-      // Need more bytes to complete this cluster
-      return false;
+  // 2. Check if next bytes in accumulator are the start of a subsequent Cluster
+  if (clusterAccumulator.length >= 4) {
+    const nextEl = readElementId(clusterAccumulator, 0);
+    if (nextEl && nextEl.value === EBML_ID.CLUSTER) {
+      inCluster = false;
+      return true; // Re-enter to process next cluster header
     }
-  } else {
-    // Indefinite size: cluster ends at next Cluster ID
-    const nextClusterIdx = findNextCluster(clusterAccumulator, payloadStart);
-    if (nextClusterIdx === -1) {
-      // Need more data to find end
-      return false;
+  }
+
+  // 3. Incrementally parse completed blocks from current cluster payload
+  const { clusterTimeMs, blocks, bytesConsumed } = parseClusterPayload(
+    clusterAccumulator,
+    currentClusterTimeMs
+  );
+  currentClusterTimeMs = clusterTimeMs;
+
+  if (bytesConsumed > 0 && clusterPayloadRemaining > 0) {
+    clusterPayloadRemaining = Math.max(0, clusterPayloadRemaining - bytesConsumed);
+    if (clusterPayloadRemaining === 0) {
+      inCluster = false;
     }
-    payloadEnd = nextClusterIdx;
   }
 
-  const clusterPayload = clusterAccumulator.subarray(payloadStart, payloadEnd);
+  // Filter video blocks for emission threshold
+  const videoTrackNum = transmuxer.getVideoTrackNumber();
+  const videoBlocks = blocks.filter((b: ParsedBlock) => b.trackNumber === videoTrackNum);
 
-  // Transmux cluster
-  const result = transmuxer.transmuxCluster(clusterPayload);
+  // Emit fMP4 media segment as soon as we have >= 8 video blocks (~300ms) or when cluster ends
+  const shouldEmit = videoBlocks.length >= 8 || (!inCluster && videoBlocks.length > 0);
 
-  // If initSegment was generated during this cluster, emit it first!
-  if (result?.initSegment) {
-    postWorkerMessage(
-      {
-        type: 'INIT_SEGMENT',
-        buffer: result.initSegment.buffer,
-      },
-      [result.initSegment.buffer]
-    );
+  if (shouldEmit) {
+    const result = transmuxer.transmuxBlocks(blocks);
+
+    if (result?.initSegment) {
+      postWorkerMessage(
+        {
+          type: 'INIT_SEGMENT',
+          buffer: result.initSegment.buffer,
+        },
+        [result.initSegment.buffer]
+      );
+    }
+
+    if (result?.audioInitSegment) {
+      postWorkerMessage(
+        {
+          type: 'AUDIO_INIT_SEGMENT',
+          buffer: result.audioInitSegment.buffer,
+        },
+        [result.audioInitSegment.buffer]
+      );
+    }
+
+    if (result?.mediaSegment) {
+      lastEmittedPtsSec = result.endPtsMs / 1000;
+      postWorkerMessage(
+        {
+          type: 'MEDIA_SEGMENT',
+          buffer: result.mediaSegment.buffer,
+          startPtsSec: result.startPtsMs / 1000,
+          endPtsSec: result.endPtsMs / 1000,
+          samplesCount: result.samplesCount,
+        },
+        [result.mediaSegment.buffer]
+      );
+    }
+
+    if (result?.audioMediaSegment) {
+      postWorkerMessage(
+        {
+          type: 'AUDIO_MEDIA_SEGMENT',
+          buffer: result.audioMediaSegment.buffer,
+        },
+        [result.audioMediaSegment.buffer]
+      );
+    }
+
+    clusterAccumulator = clusterAccumulator.slice(bytesConsumed);
+    return true;
   }
 
-  // If audioInitSegment was generated, emit audio init segment
-  if (result?.audioInitSegment) {
-    postWorkerMessage(
-      {
-        type: 'AUDIO_INIT_SEGMENT',
-        buffer: result.audioInitSegment.buffer,
-      },
-      [result.audioInitSegment.buffer]
-    );
+  // If header or timestamp was parsed with no blocks, consume those bytes
+  if (bytesConsumed > 0 && blocks.length === 0) {
+    clusterAccumulator = clusterAccumulator.slice(bytesConsumed);
+    return true;
   }
 
-  if (result?.mediaSegment) {
-    lastEmittedPtsSec = result.endPtsMs / 1000;
-    postWorkerMessage(
-      {
-        type: 'MEDIA_SEGMENT',
-        buffer: result.mediaSegment.buffer,
-        startPtsSec: result.startPtsMs / 1000,
-        endPtsSec: result.endPtsMs / 1000,
-        samplesCount: result.samplesCount,
-      },
-      [result.mediaSegment.buffer]
-    );
-  }
-
-  if (result?.audioMediaSegment) {
-    postWorkerMessage(
-      {
-        type: 'AUDIO_MEDIA_SEGMENT',
-        buffer: result.audioMediaSegment.buffer,
-      },
-      [result.audioMediaSegment.buffer]
-    );
-  }
-
-  // Slide accumulator forward
-  clusterAccumulator = clusterAccumulator.slice(payloadEnd);
-  return true;
+  return false;
 }
 
 /**
@@ -520,6 +575,9 @@ async function seekTo(targetTimeSec: number) {
   const thisLoopId = activeLoopId;
   fetcher.abortAll();
   clusterAccumulator = new Uint8Array(0);
+  inCluster = false;
+  currentClusterTimeMs = 0;
+  clusterPayloadRemaining = -1;
 
   currentPlayheadSec = targetTimeSec;
   lastEmittedPtsSec = targetTimeSec;

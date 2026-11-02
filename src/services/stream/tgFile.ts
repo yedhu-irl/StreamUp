@@ -216,7 +216,49 @@ export class TgFile {
     this.sortQueue();
     this.drainQueue();
 
+    // Saturate remaining MTProto worker slots with lookahead chunks [N+1, N+2, N+3]
+    this.scheduleLookahead(chunkIndex);
+
     return promise;
+  }
+
+  private scheduleLookahead(baseIndex: number): void {
+    const lookaheadCount = 3; // Keep all 4 MTProto workers fully saturated
+    let queueChanged = false;
+
+    for (let i = 1; i <= lookaheadCount; i++) {
+      const nextIndex = baseIndex + i;
+      if (nextIndex >= this.totalChunks) break;
+      if (this.ramCache.has(nextIndex) || this.downloadedChunks.has(nextIndex)) continue;
+      if (this.inFlightJobs.has(nextIndex)) continue;
+      if (this.jobQueue.some((j) => j.index === nextIndex)) continue;
+
+      const controller = new AbortController();
+      let res!: (b: Uint8Array) => void;
+      let rej!: (e: any) => void;
+      const promise = new Promise<Uint8Array>((resolve, reject) => {
+        res = resolve;
+        rej = reject;
+      });
+
+      const job: Job = {
+        index: nextIndex,
+        urgent: false,
+        controller,
+        promise,
+        resolve: res,
+        reject: rej,
+        started: false,
+      };
+
+      this.jobQueue.push(job);
+      queueChanged = true;
+    }
+
+    if (queueChanged) {
+      this.sortQueue();
+      this.drainQueue();
+    }
   }
 
   private sortQueue(): void {
