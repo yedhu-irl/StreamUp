@@ -11,6 +11,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, onLogout 
   const [apiId, setApiId] = useState<string>('');
   const [apiHash, setApiHash] = useState<string>('');
   const [tmdbKey, setTmdbKey] = useState<string>('');
+  const [autoPlayNext, setAutoPlayNext] = useState<boolean>(true);
   const [savedSuccess, setSavedSuccess] = useState<boolean>(false);
 
   useEffect(() => {
@@ -22,6 +23,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, onLogout 
       }
       const customTmdb = localStorage.getItem('streamup_tmdb_key') || '';
       setTmdbKey(customTmdb);
+      setAutoPlayNext(localStorage.getItem('streamup_autoplay_next') !== 'false');
     }
     load();
   }, []);
@@ -40,6 +42,8 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, onLogout 
     } else {
       localStorage.removeItem('streamup_tmdb_key');
     }
+
+    localStorage.setItem('streamup_autoplay_next', autoPlayNext ? 'true' : 'false');
 
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
@@ -120,6 +124,27 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ onClose, onLogout 
               placeholder="Leave blank to use default cinema key"
               className="w-full px-4 py-3 rounded-2xl bg-white/10 border border-white/15 text-sm text-white focus:outline-none focus:border-white transition-all font-mono"
             />
+          </div>
+
+          {/* Auto-Play Next Episode Switch */}
+          <div className="flex items-center justify-between p-3.5 rounded-2xl bg-white/5 border border-white/10">
+            <div>
+              <span className="text-xs font-semibold text-white block">Auto-Play Next Episode</span>
+              <span className="text-[11px] text-white/50">Automatically play next episode when current video ends</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setAutoPlayNext(!autoPlayNext)}
+              className={`w-12 h-6 rounded-full transition-colors relative flex items-center px-0.5 ${
+                autoPlayNext ? 'bg-emerald-500' : 'bg-white/20'
+              }`}
+            >
+              <div
+                className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${
+                  autoPlayNext ? 'translate-x-6' : 'translate-x-0'
+                }`}
+              />
+            </button>
           </div>
 
           <div className="pt-2 flex items-center space-x-3">

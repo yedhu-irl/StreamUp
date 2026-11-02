@@ -60,8 +60,9 @@ export function App() {
   const [playerInitialTime, setPlayerInitialTime] = useState<number>(0);
 
   const handleInitiatePlay = (item: ChannelVideoItem, initialTime = 0) => {
-    setStagingMediaItem(item);
-    setStagingInitialTime(initialTime);
+    setActivePlayingItem(item);
+    setPlayerInitialTime(initialTime);
+    setStagingMediaItem(null);
   };
 
   // Data States
@@ -508,26 +509,34 @@ export function App() {
     });
   };
 
-  // Find next episode in series
+  // Find next episode in series or next movie in channel
   const getNextEpisode = (current: ChannelVideoItem): ChannelVideoItem | null => {
-    if (!current.parsed.isSeries) return null;
-    const titleKey = (current.tmdb?.title || current.parsed.cleanTitle).toLowerCase();
-    const grp = seriesGroups.find((g) => g.showTitle.toLowerCase() === titleKey);
-    if (!grp) return null;
+    if (current.parsed.isSeries) {
+      const titleKey = (current.tmdb?.title || current.parsed.cleanTitle).toLowerCase();
+      const grp = seriesGroups.find((g) => g.showTitle.toLowerCase() === titleKey);
+      if (grp) {
+        const currentSeason = current.parsed.season || 1;
+        const currentEp = current.parsed.episode || 1;
 
-    const currentSeason = current.parsed.season || 1;
-    const currentEp = current.parsed.episode || 1;
+        const seasonList = grp.seasons[currentSeason];
+        if (seasonList) {
+          const nextInSeason = seasonList.find((e) => e.episodeNumber === currentEp + 1);
+          if (nextInSeason) return nextInSeason.videoItem;
+        }
 
-    const seasonList = grp.seasons[currentSeason];
-    if (seasonList) {
-      const nextInSeason = seasonList.find((e) => e.episodeNumber === currentEp + 1);
-      if (nextInSeason) return nextInSeason.videoItem;
+        // Next season episode 1
+        const nextSeasonList = grp.seasons[currentSeason + 1];
+        if (nextSeasonList && nextSeasonList.length > 0) {
+          return nextSeasonList[0].videoItem;
+        }
+      }
     }
 
-    // Next season episode 1
-    const nextSeasonList = grp.seasons[currentSeason + 1];
-    if (nextSeasonList && nextSeasonList.length > 0) {
-      return nextSeasonList[0].videoItem;
+    // Fallback: Next video item in same channel
+    const chVideos = videos.filter((v) => v.channelId === current.channelId);
+    const curIdx = chVideos.findIndex((v) => v.id === current.id);
+    if (curIdx !== -1 && curIdx + 1 < chVideos.length) {
+      return chVideos[curIdx + 1];
     }
 
     return null;

@@ -123,19 +123,19 @@ export const SearchModal: React.FC<SearchModalProps> = ({
       <div className="max-w-7xl mx-auto px-6 md:px-12 py-8 space-y-8">
         {/* Apple TV Minimalist Search Capsule */}
         <div className="relative flex items-center max-w-2xl mx-auto">
-          <Search className="absolute left-6 w-5 h-5 text-white/40 pointer-events-none" />
+          <Search className="absolute left-5 w-5 h-5 text-white/40 pointer-events-none" />
           <input
             type="text"
             autoFocus
             placeholder="Search movies, TV shows, actors, resolutions..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="w-full pl-15 pr-14 py-4 rounded-full bg-[#141416]/90 border border-white/15 focus:border-white text-base text-white placeholder-white/40 focus:outline-none transition-all shadow-2xl focus:ring-4 focus:ring-white/10"
+            className="w-full pl-14 pr-12 py-3.5 rounded-full bg-[#141416]/90 border border-white/15 focus:border-white text-sm md:text-base text-white placeholder-white/40 focus:outline-none transition-all shadow-2xl focus:ring-4 focus:ring-white/10"
           />
           {query && (
             <button
               onClick={() => setQuery('')}
-              className="absolute right-5 w-8 h-8 rounded-full hover:bg-white/10 text-white/60 hover:text-white flex items-center justify-center transition-colors"
+              className="absolute right-4 w-8 h-8 rounded-full hover:bg-white/10 text-white/60 hover:text-white flex items-center justify-center transition-colors"
             >
               <X className="w-4 h-4" />
             </button>

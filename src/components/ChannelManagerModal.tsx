@@ -165,12 +165,40 @@ export const ChannelManagerModal: React.FC<ChannelManagerModalProps> = ({
   };
 
   // Category counts
+  const handlePurgeAllGroups = async () => {
+    const joinedIds = new Set(joinedChannels.map((c) => c.id));
+    const nonChannels = savedChannels.filter((s) => !joinedIds.has(s.id));
+    if (nonChannels.length === 0) return;
+    if (confirm(`Remove ${nonChannels.length} saved group(s) from StreamUp?`)) {
+      for (const nc of nonChannels) {
+        await db.channels.delete(nc.id);
+        await db.videos.where('channelId').equals(nc.id).delete();
+      }
+      setSavedChannels((prev) => prev.filter((s) => joinedIds.has(s.id)));
+      onChannelsUpdated();
+    }
+  };
+
+  // Merge joined broadcast channels with any saved channels/groups in DB so nothing is ever trapped
+  const allChannelsMap = new Map<string, ChannelCategory>();
+  for (const ch of joinedChannels) {
+    allChannelsMap.set(ch.id, ch);
+  }
+  for (const s of savedChannels) {
+    if (!allChannelsMap.has(s.id)) {
+      allChannelsMap.set(s.id, s);
+    }
+  }
+  const combinedChannels = Array.from(allChannelsMap.values());
+  const joinedIdsSet = new Set(joinedChannels.map((c) => c.id));
+  const orphanedGroupsCount = savedChannels.filter((s) => !joinedIdsSet.has(s.id)).length;
+
   const moviesCount = savedChannels.filter((c) => c.contentType === 'movies').length;
   const seriesCount = savedChannels.filter((c) => c.contentType === 'series').length;
-  const availableCount = joinedChannels.filter((c) => !savedChannels.some((s) => s.id === c.id)).length;
+  const availableCount = combinedChannels.filter((c) => !savedChannels.some((s) => s.id === c.id)).length;
 
   // Filtered channel list
-  const filteredChannels = joinedChannels.filter((ch) => {
+  const filteredChannels = combinedChannels.filter((ch) => {
     const saved = savedChannels.find((s) => s.id === ch.id);
     if (channelFilter === 'movies') return saved?.contentType === 'movies';
     if (channelFilter === 'series') return saved?.contentType === 'series';
@@ -218,6 +246,21 @@ export const ChannelManagerModal: React.FC<ChannelManagerModalProps> = ({
               </div>
             </div>
           </div>
+
+          {orphanedGroupsCount > 0 && (
+            <div className="flex items-center justify-between p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-200 gap-3">
+              <div className="flex items-center space-x-2">
+                <Sparkles className="w-4 h-4 text-amber-400 flex-none" />
+                <span>Found {orphanedGroupsCount} saved group(s) or legacy chats that cannot be auto-synced.</span>
+              </div>
+              <button
+                onClick={handlePurgeAllGroups}
+                className="px-3 py-1.5 rounded-full bg-amber-400 hover:bg-amber-300 text-black font-semibold text-xs transition-all active:scale-95 flex-none"
+              >
+                Remove All Groups
+              </button>
+            </div>
+          )}
 
           {syncStatus && (
             <div className="flex items-center space-x-2 p-3.5 rounded-2xl bg-white/[0.05] border border-white/10 text-xs text-white/90">
@@ -306,12 +349,18 @@ export const ChannelManagerModal: React.FC<ChannelManagerModalProps> = ({
                           </h4>
                           {isAdded && (
                             <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
-                              isEnabled 
+                              !joinedIdsSet.has(ch.id)
+                                ? 'bg-amber-500/15 border-amber-500/30 text-amber-300'
+                                : isEnabled 
                                 ? 'bg-emerald-500/15 border-emerald-500/30 text-emerald-300' 
                                 : 'bg-white/10 border-white/10 text-white/40'
                             }`}>
-                              <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${isEnabled ? 'bg-emerald-400' : 'bg-white/40'}`} />
-                              {isEnabled ? 'Active Shelf' : 'Hidden'}
+                              <span className={`w-1.5 h-1.5 rounded-full mr-1.5 ${
+                                !joinedIdsSet.has(ch.id)
+                                  ? 'bg-amber-400'
+                                  : isEnabled ? 'bg-emerald-400' : 'bg-white/40'
+                              }`} />
+                              {!joinedIdsSet.has(ch.id) ? 'Legacy Group' : isEnabled ? 'Active Shelf' : 'Hidden'}
                             </span>
                           )}
                         </div>
