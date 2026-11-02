@@ -1,0 +1,34 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Production build artifacts
+dist/
+build/
+.dist/
+
+# Environment variables, sensitive keys, and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Temporary files and scratch pads
+scratch/
+tmp/
+*.tmp
+*.log
+
+# Agent / Skill configs & metadata
+.impeccable/
+apple-design-skill.md
+.gemini/
+.claude/
+.agents/
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
