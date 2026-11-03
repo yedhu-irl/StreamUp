@@ -38,6 +38,22 @@ export function translatePlayerError(rawError: any): PlayerErrorDetails {
 
   const errStr = typeof rawError === 'string' ? rawError : rawError?.message || String(rawError);
 
+  // Telegram Media Auth Key / Session Expiration
+  if (
+    errStr.includes('AUTH_KEY_UNREGISTERED') ||
+    errStr.includes('AUTH_KEY_DUPLICATED') ||
+    errStr.includes('SESSION_REVOKED') ||
+    errStr.includes('401')
+  ) {
+    return {
+      code: 'NETWORK_TIMEOUT',
+      title: 'Media Authorization Refreshing',
+      message: 'Telegram media key expired. Re-authorizing and retrying stream...',
+      technicalDetails: errStr,
+      recoverable: true,
+    };
+  }
+
   // Network timeout / connection loss
   if (
     errStr.includes('timed out') ||

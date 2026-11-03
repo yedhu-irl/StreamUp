@@ -617,26 +617,26 @@ export class MSEController {
   }
 
   /**
-   * Micro-gap jumper to recover from sub-frame stalls (<150ms) across cluster boundaries
+   * Micro-gap jumper to recover from sub-frame stalls (<500ms) across cluster boundaries or lead-in offset
    */
   public bridgeBufferGap(): void {
     if (!this.video || !this.video.buffered || this.video.buffered.length === 0) return;
     const ct = this.video.currentTime;
     for (let i = 0; i < this.video.buffered.length; i++) {
       const start = this.video.buffered.start(i);
-      // Case 1: Playhead is behind start of buffered range by < 0.15s
-      if (ct < start && (start - ct) < 0.15) {
+      // Case 1: Playhead is behind start of buffered range by < 0.5s
+      if (ct < start && (start - ct) < 0.5) {
         try {
           this.video.currentTime = start;
         } catch (e) {}
         return;
       }
-      // Case 2: Playhead is at the end of range i, and next range (i + 1) starts within 0.15s
+      // Case 2: Playhead is at the end of range i, and next range (i + 1) starts within 0.5s
       const end = this.video.buffered.end(i);
       if (i + 1 < this.video.buffered.length) {
         const nextStart = this.video.buffered.start(i + 1);
         const gap = nextStart - end;
-        if (gap > 0 && gap < 0.15 && ct >= end - 0.05 && ct <= nextStart) {
+        if (gap > 0 && gap < 0.5 && ct >= end - 0.1 && ct <= nextStart) {
           try {
             this.video.currentTime = nextStart;
           } catch (e) {}

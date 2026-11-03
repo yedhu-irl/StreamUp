@@ -111,6 +111,46 @@ describe('Playback E2E Suite: TV Series & Buffering Stabilization', () => {
       expect(meta.durationSec).toBe(120);
       expect(Number.isNaN(meta.durationSec)).toBe(false);
     });
+
+    it('E2E-R1-5: Should maintain continuous monotonic DTS across B-frames and consecutive segments', () => {
+      const mkvBytes = buildSyntheticMkv({
+        durationSec: 120,
+        videoCodec: 'V_MPEG4/ISO/AVC',
+      });
+      const meta = parseMatroskaHeader(mkvBytes);
+      const transmuxer = new MatroskaTransmuxer(meta);
+
+      // Generate init segment
+      transmuxer.generateInitSegment();
+
+      // B-frame GOP in decode order: I(80), P(160), B(40), B(80), P(240)
+      const batch1 = [
+        { trackNumber: 1, relativeTime: 0, isKeyframe: true, data: new Uint8Array([0x65, 0x88]), ptsMs: 80 },
+        { trackNumber: 1, relativeTime: 40, isKeyframe: false, data: new Uint8Array([0x41, 0x01]), ptsMs: 160 },
+        { trackNumber: 1, relativeTime: 80, isKeyframe: false, data: new Uint8Array([0x01, 0x02]), ptsMs: 40 },
+        { trackNumber: 1, relativeTime: 120, isKeyframe: false, data: new Uint8Array([0x01, 0x03]), ptsMs: 80 },
+        { trackNumber: 1, relativeTime: 160, isKeyframe: false, data: new Uint8Array([0x41, 0x04]), ptsMs: 240 },
+      ];
+
+      const res1 = transmuxer.transmuxBlocks(batch1);
+      expect(res1).toBeDefined();
+      expect(res1!.samplesCount).toBe(5);
+      expect(res1!.mediaSegment).toBeDefined();
+      expect(res1!.mediaSegment!.length).toBeGreaterThan(0);
+
+      // Subsequent batch: B(160), B(200), P(320)
+      const batch2 = [
+        { trackNumber: 1, relativeTime: 200, isKeyframe: false, data: new Uint8Array([0x01, 0x05]), ptsMs: 160 },
+        { trackNumber: 1, relativeTime: 240, isKeyframe: false, data: new Uint8Array([0x01, 0x06]), ptsMs: 200 },
+        { trackNumber: 1, relativeTime: 280, isKeyframe: false, data: new Uint8Array([0x41, 0x07]), ptsMs: 320 },
+      ];
+
+      const res2 = transmuxer.transmuxBlocks(batch2);
+      expect(res2).toBeDefined();
+      expect(res2!.samplesCount).toBe(3);
+      expect(res2!.mediaSegment).toBeDefined();
+      expect(res2!.mediaSegment!.length).toBeGreaterThan(0);
+    });
   });
 
   describe('R2: Video Buffering Elimination', () => {

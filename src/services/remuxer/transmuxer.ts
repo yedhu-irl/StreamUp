@@ -47,6 +47,9 @@ export class MatroskaTransmuxer {
   private sequenceNumber = 1;
   private audioSequenceNumber = 1;
   private defaultSampleDurationMs = 40; // 25fps fallback default
+  private frameDurationMs = 40;         // High-precision frame duration in ms
+  private currentVideoDtsMs = -1;       // Monotonic continuous video DTS
+  private currentAudioDtsMs = -1;       // Monotonic continuous audio DTS
 
   constructor(metadata: MatroskaMetadata) {
     this.metadata = metadata;
@@ -62,9 +65,10 @@ export class MatroskaTransmuxer {
 
       if (vTrack.sps) this.sps = vTrack.sps;
       if (vTrack.pps) this.pps = vTrack.pps;
-      if (vTrack.defaultDuration) {
-        // defaultDuration is in nanoseconds
-        this.defaultSampleDurationMs = Math.round(vTrack.defaultDuration / 1_000_000);
+      if (vTrack.defaultDuration && vTrack.defaultDuration > 0) {
+        // defaultDuration is in nanoseconds (e.g. 41666666 for 24fps -> 41.666666 ms)
+        this.frameDurationMs = vTrack.defaultDuration / 1_000_000;
+        this.defaultSampleDurationMs = Math.round(this.frameDurationMs);
       }
     }
 
@@ -274,35 +278,36 @@ export class MatroskaTransmuxer {
 
     // Convert blocks to VideoSamples
     const samples: VideoSample[] = [];
-    const basePts = videoBlocks[0].ptsMs;
+
+    // Continuous monotonic DTS tracking:
+    // If starting a new stream or post-seek, initialize DTS to starting timestamp
+    if (this.currentVideoDtsMs < 0) {
+      const minPts = Math.min(...videoBlocks.map((b) => b.ptsMs));
+      this.currentVideoDtsMs = Math.max(0, minPts);
+    }
+
+    const baseDecodeTime = Math.round(this.currentVideoDtsMs);
 
     for (let i = 0; i < videoBlocks.length; i++) {
       const current = videoBlocks[i];
-      const next = videoBlocks[i + 1];
-
-      let duration = next
-        ? Math.max(1, next.ptsMs - current.ptsMs)
-        : this.defaultSampleDurationMs;
-
-      // Sanity cap sample duration to 500ms to prevent buffer drift
-      if (duration > 500) {
-        duration = this.defaultSampleDurationMs;
-      }
+      const sampleDts = this.currentVideoDtsMs;
+      this.currentVideoDtsMs += this.frameDurationMs;
+      const duration = Math.max(1, Math.round(this.currentVideoDtsMs) - Math.round(sampleDts));
 
       const avccData = annexBToAvcc(current.data);
 
       samples.push({
         data: avccData,
         duration,
-        dts: current.ptsMs,
-        pts: current.ptsMs,
+        dts: Math.round(sampleDts),
+        pts: Math.round(current.ptsMs),
         isKeyframe: current.isKeyframe,
       });
     }
 
     const mediaSegment = generateMediaSegment(
       this.sequenceNumber++,
-      basePts,
+      baseDecodeTime,
       1, // trackId 1
       samples
     );
@@ -332,25 +337,29 @@ export class MatroskaTransmuxer {
       if (audioBlocks.length > 0) {
         const audioSamples: AudioSample[] = [];
         const sampleRate = Math.round(this.audioTrack.samplingFrequency || 48000);
-        const standardFrameDur = Math.round((1024 / sampleRate) * 1000);
+        const standardFrameDur = (1024 / sampleRate) * 1000;
+
+        if (this.currentAudioDtsMs < 0) {
+          this.currentAudioDtsMs = Math.max(0, audioBlocks[0].ptsMs);
+        }
+        const baseAudioDecodeTime = Math.round(this.currentAudioDtsMs);
 
         for (let i = 0; i < audioBlocks.length; i++) {
           const cur = audioBlocks[i];
-          const next = audioBlocks[i + 1];
-          let dur = next ? Math.max(1, next.ptsMs - cur.ptsMs) : standardFrameDur;
-          if (dur > 200) dur = standardFrameDur;
+          const sampleAudioDts = this.currentAudioDtsMs;
+          this.currentAudioDtsMs += standardFrameDur;
+          const dur = Math.max(1, Math.round(this.currentAudioDtsMs) - Math.round(sampleAudioDts));
 
           audioSamples.push({
             data: cur.data,
             duration: dur,
-            pts: cur.ptsMs,
+            pts: Math.round(sampleAudioDts),
           });
         }
 
-        const baseAudioPts = audioBlocks[0].ptsMs;
         audioMediaSegment = generateAudioMediaSegment(
           this.audioSequenceNumber++,
-          baseAudioPts,
+          baseAudioDecodeTime,
           2, // trackId 2
           audioSamples
         );
@@ -369,9 +378,11 @@ export class MatroskaTransmuxer {
   }
 
   public resetSequence(newBasePtsMs = 0): void {
-    // When seeking to a new timeline point, reset sequence numbers
+    // When seeking to a new timeline point, reset sequence numbers and continuous DTS
     this.sequenceNumber = 1;
     this.audioSequenceNumber = 1;
     this.waitingForKeyframe = true;
+    this.currentVideoDtsMs = -1;
+    this.currentAudioDtsMs = -1;
   }
 }

@@ -27,6 +27,16 @@ function postWorkerMessage(msg: any, transfer?: Transferable[]): void {
   }
 }
 
+function toTransferableArrayBuffer(u8: Uint8Array): ArrayBuffer {
+  const buf = u8.buffer;
+  if (buf instanceof ArrayBuffer && u8.byteOffset === 0 && u8.byteLength === buf.byteLength) {
+    return buf;
+  }
+  const copy = new Uint8Array(u8.byteLength);
+  copy.set(u8);
+  return copy.buffer;
+}
+
 interface FetchRequestRecord {
   resolve: (buffer: ArrayBuffer) => void;
   reject: (err: Error) => void;
@@ -409,12 +419,13 @@ async function startStream(
     // Check if init segment is ready right away
     const initSeg = transmuxer.generateInitSegment();
     if (initSeg) {
+      const ab = toTransferableArrayBuffer(initSeg);
       postWorkerMessage(
         {
           type: 'INIT_SEGMENT',
-          buffer: initSeg.buffer,
+          buffer: ab,
         },
-        [initSeg.buffer]
+        [ab]
       );
     }
 
@@ -481,11 +492,11 @@ async function runStreamLoop(loopId: number) {
         break;
       }
 
-      // Pipelined lookahead prefetching (TMPlayer 30-second read-ahead model):
-      // Low watermark (<10s) triggers aggressive burst prefetch (24 chunks = 12 MiB ahead)
-      // Normal watermark triggers 16 chunks (8 MiB ahead)
+      // Focused lookahead (TMPlayer contiguous window model):
+      // In low watermark (<10s), prioritize immediate playhead with 2 chunks ahead to prevent network contention.
+      // In normal watermark, buffer 4 chunks ahead (2 MB).
       const isLowWatermark = forwardBufferedSec < LOW_WATERMARK_SEC;
-      const prefetchLookahead = isLowWatermark ? 24 : 16;
+      const prefetchLookahead = isLowWatermark ? 2 : 4;
       const fetchOffset = DownloadWindow.alignOffset(currentReadOffset);
       const currentChunk = Math.floor(fetchOffset / CHUNK_SIZE);
       const streamId = `${activeChannelId}_${activeMessageId}`;
@@ -591,10 +602,10 @@ function processAccumulator(isEof = false): boolean {
   const videoTrackNum = transmuxer.getVideoTrackNumber();
   const videoBlocks = blocks.filter((b: ParsedBlock) => b.trackNumber === videoTrackNum);
 
-  // Batch media segments into smooth increments (~1-2s / GOP boundaries) instead of emitting 8-frame micro-bursts,
+  // Batch media segments into smooth increments (~250-600ms) instead of emitting huge burst blocks,
   // while preserving fast initial startup (<4s forward buffer) and immediate EOF flushing.
   const forwardSec = lastEmittedPtsSec > 0 ? (lastEmittedPtsSec - currentPlayheadSec) : 0;
-  const minBlocksThreshold = (lastEmittedPtsSec === 0 || forwardSec < 4) ? 8 : 24;
+  const minBlocksThreshold = (lastEmittedPtsSec === 0 || forwardSec < 4) ? 6 : 16;
 
   const shouldEmit =
     videoBlocks.length >= minBlocksThreshold ||
@@ -605,46 +616,50 @@ function processAccumulator(isEof = false): boolean {
     const result = transmuxer.transmuxBlocks(blocks);
 
     if (result?.initSegment) {
+      const ab = toTransferableArrayBuffer(result.initSegment);
       postWorkerMessage(
         {
           type: 'INIT_SEGMENT',
-          buffer: result.initSegment.buffer,
+          buffer: ab,
         },
-        [result.initSegment.buffer]
+        [ab]
       );
     }
 
     if (result?.audioInitSegment) {
+      const ab = toTransferableArrayBuffer(result.audioInitSegment);
       postWorkerMessage(
         {
           type: 'AUDIO_INIT_SEGMENT',
-          buffer: result.audioInitSegment.buffer,
+          buffer: ab,
         },
-        [result.audioInitSegment.buffer]
+        [ab]
       );
     }
 
     if (result?.mediaSegment) {
       lastEmittedPtsSec = result.endPtsMs / 1000;
+      const ab = toTransferableArrayBuffer(result.mediaSegment);
       postWorkerMessage(
         {
           type: 'MEDIA_SEGMENT',
-          buffer: result.mediaSegment.buffer,
+          buffer: ab,
           startPtsSec: result.startPtsMs / 1000,
           endPtsSec: result.endPtsMs / 1000,
           samplesCount: result.samplesCount,
         },
-        [result.mediaSegment.buffer]
+        [ab]
       );
     }
 
     if (result?.audioMediaSegment) {
+      const ab = toTransferableArrayBuffer(result.audioMediaSegment);
       postWorkerMessage(
         {
           type: 'AUDIO_MEDIA_SEGMENT',
-          buffer: result.audioMediaSegment.buffer,
+          buffer: ab,
         },
-        [result.audioMediaSegment.buffer]
+        [ab]
       );
     }
 

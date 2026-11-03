@@ -151,6 +151,13 @@ export class PlayerEngine {
           : mediaErr?.code === 4
           ? 'MEDIA_ERR_SRC_NOT_SUPPORTED: Video format or codec not supported'
           : 'Video decoding or playback error occurred');
+
+      if (!this.hasTriedNative && !this.isMkvOrTs) {
+        this.hasTriedNative = true;
+        console.warn('MSE video decode error, falling back to Native HTTP 206 stream:', errMsg);
+        this.startNativePath();
+        return;
+      }
       this.options.onError?.(errMsg);
     };
     this.video.addEventListener('error', this.mseVideoErrorListener, { once: true });

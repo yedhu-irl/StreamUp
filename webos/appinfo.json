@@ -1,0 +1,21 @@
+{
+  "id": "com.streamup.tv",
+  "version": "1.0.0",
+  "vendor": "StreamUp",
+  "type": "web",
+  "main": "index.html",
+  "title": "StreamUp",
+  "icon": "icon80.png",
+  "largeIcon": "icon130.png",
+  "bgImage": "splash.png",
+  "splashBackground": "#08090d",
+  "resolution": "1920x1080",
+  "handlesRelaunch": true,
+  "disableWebSecurity": true,
+  "allowExternalRequests": true,
+  "supportTouch": false,
+  "requiredPermissions": [
+    "network"
+  ]
+}
+

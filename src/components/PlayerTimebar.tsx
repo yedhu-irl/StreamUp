@@ -4,8 +4,9 @@ import type { ByteRange } from '../services/windowPlanner';
 interface PlayerTimebarProps {
   currentTime: number;
   duration: number;
-  totalSize: number;
-  downloadedRanges: ByteRange[];
+  totalSize?: number;
+  bufferedRanges?: Array<{ start: number; end: number }>;
+  downloadedRanges?: ByteRange[];
   bookmarks?: Array<{ id: string; timeSec: number; note: string }>;
   onSeek: (targetSec: number) => void;
   onPreviewChange?: (previewSec: number | null) => void;
@@ -14,8 +15,9 @@ interface PlayerTimebarProps {
 export const PlayerTimebar: React.FC<PlayerTimebarProps> = ({
   currentTime,
   duration,
-  totalSize,
-  downloadedRanges,
+  totalSize = 0,
+  bufferedRanges,
+  downloadedRanges = [],
   bookmarks = [],
   onSeek,
   onPreviewChange,
@@ -97,15 +99,24 @@ export const PlayerTimebar: React.FC<PlayerTimebarProps> = ({
     window.addEventListener('mouseup', onGlobalUp);
   };
 
-  // Convert downloaded byte ranges to visual percentages
+  // Convert buffered time ranges (or downloaded byte ranges) to visual percentages (YouTube model)
   const rangeSegments = useMemo(() => {
-    if (totalSize <= 0) return [];
-    return downloadedRanges.map((r) => {
-      const left = Math.max(0, Math.min(100, (r.start / totalSize) * 100));
-      const width = Math.max(0, Math.min(100 - left, ((r.end - r.start) / totalSize) * 100));
-      return { left, width };
-    });
-  }, [downloadedRanges, totalSize]);
+    if (bufferedRanges && bufferedRanges.length > 0 && duration > 0) {
+      return bufferedRanges.map((r) => {
+        const left = Math.max(0, Math.min(100, (r.start / duration) * 100));
+        const width = Math.max(0, Math.min(100 - left, ((r.end - r.start) / duration) * 100));
+        return { left, width };
+      });
+    }
+    if (totalSize > 0 && downloadedRanges && downloadedRanges.length > 0) {
+      return downloadedRanges.map((r) => {
+        const left = Math.max(0, Math.min(100, (r.start / totalSize) * 100));
+        const width = Math.max(0, Math.min(100 - left, ((r.end - r.start) / totalSize) * 100));
+        return { left, width };
+      });
+    }
+    return [];
+  }, [bufferedRanges, duration, downloadedRanges, totalSize]);
 
   const playedPercent = duration > 0 ? Math.min(100, Math.max(0, (currentTime / duration) * 100)) : 0;
 
@@ -129,11 +140,11 @@ export const PlayerTimebar: React.FC<PlayerTimebarProps> = ({
 
       {/* Scrubber Track Container */}
       <div className="relative w-full h-1.5 group-hover:h-2.5 rounded-full bg-white/15 overflow-hidden transition-all duration-200">
-        {/* Layer 2: Telegram Downloaded Byte Ranges */}
+        {/* Layer 2: YouTube-style Buffered Ranges (Gray bar) */}
         {rangeSegments.map((seg, idx) => (
           <div
             key={idx}
-            className="absolute top-0 bottom-0 bg-white/40 transition-all duration-300"
+            className="absolute top-0 bottom-0 bg-white/40 group-hover:bg-white/50 transition-all duration-200"
             style={{ left: `${seg.left}%`, width: `${seg.width}%` }}
           />
         ))}

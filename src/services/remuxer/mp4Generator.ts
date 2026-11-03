@@ -318,19 +318,20 @@ export function generateMediaSegment(
 
   // tfdt: Track Fragment Base Media Decode Time (64-bit if large)
   let tfdt: Uint8Array;
-  if (baseMediaDecodeTime > 0xffffffff) {
-    const high = Math.floor(baseMediaDecodeTime / 0x100000000);
-    const low = baseMediaDecodeTime >>> 0;
+  const safeBaseDecodeTime = Math.max(0, Math.round(baseMediaDecodeTime));
+  if (safeBaseDecodeTime > 0xffffffff) {
+    const high = Math.floor(safeBaseDecodeTime / 0x100000000);
+    const low = safeBaseDecodeTime >>> 0;
     tfdt = createFullBox('tfdt', 1, 0, [
       (high >>> 24) & 0xff, (high >>> 16) & 0xff, (high >>> 8) & 0xff, high & 0xff,
       (low >>> 24) & 0xff, (low >>> 16) & 0xff, (low >>> 8) & 0xff, low & 0xff,
     ]);
   } else {
     tfdt = createFullBox('tfdt', 0, 0, [
-      (baseMediaDecodeTime >>> 24) & 0xff,
-      (baseMediaDecodeTime >>> 16) & 0xff,
-      (baseMediaDecodeTime >>> 8) & 0xff,
-      baseMediaDecodeTime & 0xff,
+      (safeBaseDecodeTime >>> 24) & 0xff,
+      (safeBaseDecodeTime >>> 16) & 0xff,
+      (safeBaseDecodeTime >>> 8) & 0xff,
+      safeBaseDecodeTime & 0xff,
     ]);
   }
 
@@ -347,7 +348,7 @@ export function generateMediaSegment(
 
   let pOffset = 8;
   for (const s of samples) {
-    const compTimeOffset = s.pts - s.dts;
+    const compTimeOffset = Math.round(s.pts - s.dts);
     const isSync = s.isKeyframe;
     // sample flags: isLeading(2)=0, dependsOn(2)=isSync?2:1, isDependedOn(2)=0, hasRedundancy(2)=0, padding(3)=0, isNonSync(1)=isSync?0:1
     const flags = isSync ? 0x02000000 : 0x01010000;
@@ -359,7 +360,8 @@ export function generateMediaSegment(
     pOffset += 16;
   }
 
-  const trun = createFullBox('trun', 0, trunFlags, trunPayload);
+  // Version 1 trun supports signed 32-bit sample_composition_time_offset per ISO/IEC 14496-12
+  const trun = createFullBox('trun', 1, trunFlags, trunPayload);
   const traf = createBox('traf', tfhd, tfdt, trun);
   const moof = createBox('moof', mfhd, traf);
 
@@ -610,19 +612,20 @@ export function generateAudioMediaSegment(
   ]);
 
   let tfdt: Uint8Array;
-  if (baseMediaDecodeTime > 0xffffffff) {
-    const high = Math.floor(baseMediaDecodeTime / 0x100000000);
-    const low = baseMediaDecodeTime >>> 0;
+  const safeBaseDecodeTime = Math.max(0, Math.round(baseMediaDecodeTime));
+  if (safeBaseDecodeTime > 0xffffffff) {
+    const high = Math.floor(safeBaseDecodeTime / 0x100000000);
+    const low = safeBaseDecodeTime >>> 0;
     tfdt = createFullBox('tfdt', 1, 0, [
       (high >>> 24) & 0xff, (high >>> 16) & 0xff, (high >>> 8) & 0xff, high & 0xff,
       (low >>> 24) & 0xff, (low >>> 16) & 0xff, (low >>> 8) & 0xff, low & 0xff,
     ]);
   } else {
     tfdt = createFullBox('tfdt', 0, 0, [
-      (baseMediaDecodeTime >>> 24) & 0xff,
-      (baseMediaDecodeTime >>> 16) & 0xff,
-      (baseMediaDecodeTime >>> 8) & 0xff,
-      baseMediaDecodeTime & 0xff,
+      (safeBaseDecodeTime >>> 24) & 0xff,
+      (safeBaseDecodeTime >>> 16) & 0xff,
+      (safeBaseDecodeTime >>> 8) & 0xff,
+      safeBaseDecodeTime & 0xff,
     ]);
   }
 

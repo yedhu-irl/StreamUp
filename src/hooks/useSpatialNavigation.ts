@@ -8,7 +8,7 @@ export function useSpatialNavigation() {
   // Detect TV User Agent (webOS TV / Tizen / Android TV)
   useEffect(() => {
     const ua = navigator.userAgent.toLowerCase();
-    const isSmartTv = /webos|smarttv|appletv|googletv|tizen|crkey|hbbtv/i.test(ua);
+    const isSmartTv = /web0s|webos|smarttv|appletv|googletv|tizen|crkey|hbbtv/i.test(ua);
     if (isSmartTv) {
       setIsTvMode(true);
     }
@@ -93,7 +93,7 @@ export function useSpatialNavigation() {
 
     const handleMouseMove = () => {
       // If user moves mouse on desktop, keep TV focus subtle
-      if (isTvMode && !/webos|smarttv|tizen/i.test(navigator.userAgent.toLowerCase())) {
+      if (isTvMode && !/web0s|webos|smarttv|tizen/i.test(navigator.userAgent.toLowerCase())) {
         setIsTvMode(false);
       }
     };

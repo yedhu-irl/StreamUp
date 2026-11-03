@@ -562,7 +562,7 @@ async function processStreamMessage(
       let cleanBuffer: ArrayBuffer | null = null;
       let dcId = (cached.doc as any).dcId || 1;
 
-      for (let attempt = 0; attempt < 3; attempt++) {
+      for (let attempt = 0; attempt < 4; attempt++) {
         try {
           const sender = await (globalClient as any).getSender(dcId);
           const req = new Api.upload.GetFile({
@@ -586,8 +586,26 @@ async function processStreamMessage(
               continue;
             }
           }
+          if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || callErr.code === 401) {
+            console.warn(`Auth key unregistered on DC ${dcId}, resetting exported sender...`);
+            try {
+              if (globalClient?.session && typeof globalClient.session.setAuthKey === 'function') {
+                globalClient.session.setAuthKey(undefined, dcId);
+              }
+              if (typeof (globalClient as any)._cleanupExportedSender === 'function') {
+                await (globalClient as any)._cleanupExportedSender(dcId);
+              }
+              if ((globalClient as any)._exportedSenderPromises?.has?.(dcId)) {
+                (globalClient as any)._exportedSenderPromises.delete(dcId);
+              }
+            } catch (cleanErr) {
+              console.warn('Failed to cleanup exported sender in direct chunk fetch:', cleanErr);
+            }
+            await new Promise((r) => setTimeout(r, 300));
+            continue;
+          }
           console.warn(`Chunk fetch attempt ${attempt} warning:`, callErr);
-          if (attempt === 2) throw callErr;
+          if (attempt === 3) throw callErr;
         }
       }
 

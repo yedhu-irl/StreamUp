@@ -29,6 +29,7 @@ import {
 } from './services/telegram';
 import { fetchTMDBMetadata } from './services/tmdb';
 import { ensureStreamServiceWorker } from './services/swRegistration';
+import { useWebOSRemote } from './hooks/useWebOSRemote';
 import type { 
   ChannelCategory, 
   ChannelVideoItem, 
@@ -541,6 +542,73 @@ export function App() {
 
     return null;
   };
+
+  // Back key handler for webOS remote / TV / keyboard
+  const handleRemoteBack = useCallback(() => {
+    // 1. If player is open, close player
+    if (activePlayingItem) {
+      setActivePlayingItem(null);
+      loadAppData();
+      return true;
+    }
+    // 2. If staging media (pre-roll) is open, close staging
+    if (stagingMediaItem) {
+      setStagingMediaItem(null);
+      return true;
+    }
+    // 3. If series modal is open, close it
+    if (selectedSeries) {
+      setSelectedSeries(null);
+      return true;
+    }
+    // 4. If media detail modal is open, close it
+    if (selectedDetailItem) {
+      setSelectedDetailItem(null);
+      return true;
+    }
+    // 5. If search is open, close search
+    if (showSearch) {
+      setShowSearch(false);
+      return true;
+    }
+    // 6. If profile is open, close profile
+    if (showProfile) {
+      setShowProfile(false);
+      return true;
+    }
+    // 7. If channel manager is open, close channel manager
+    if (showChannelManager) {
+      setShowChannelManager(false);
+      return true;
+    }
+    // 8. If auth modal is open, close it if user is logged in
+    if (showAuthModal && isLoggedIn) {
+      setShowAuthModal(false);
+      return true;
+    }
+    // If on a sub-tab (activity / mylist), switch back to 'all' (home)
+    if (activeTab !== 'all') {
+      setActiveTab('all');
+      return true;
+    }
+    // Otherwise at root home screen: return false to allow webOS system exit
+    return false;
+  }, [
+    activePlayingItem,
+    stagingMediaItem,
+    selectedSeries,
+    selectedDetailItem,
+    showSearch,
+    showProfile,
+    showChannelManager,
+    showAuthModal,
+    isLoggedIn,
+    activeTab,
+  ]);
+
+  useWebOSRemote({
+    onBack: handleRemoteBack,
+  });
 
   return (
     <div className="min-h-screen bg-black text-white selection:bg-white selection:text-black antialiased font-sans">

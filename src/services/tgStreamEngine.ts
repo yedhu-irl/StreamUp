@@ -375,7 +375,7 @@ export class TgStreamEngine {
       throw new Error('Active stream document location missing');
     }
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       if (signal?.aborted) {
         throw new Error('Chunk download aborted by signal');
       }
@@ -441,7 +441,27 @@ export class TgStreamEngine {
           continue;
         }
 
-        if (attempt === 2) throw err;
+        // Handle Unregistered Auth Key on media DC
+        if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || err.code === 401) {
+          console.warn(`Auth key unregistered on DC ${dcId}, resetting exported sender and re-authorizing...`);
+          try {
+            if (client.session && typeof client.session.setAuthKey === 'function') {
+              client.session.setAuthKey(undefined, dcId);
+            }
+            if (typeof (client as any)._cleanupExportedSender === 'function') {
+              await (client as any)._cleanupExportedSender(dcId);
+            }
+            if ((client as any)._exportedSenderPromises?.has?.(dcId)) {
+              (client as any)._exportedSenderPromises.delete(dcId);
+            }
+          } catch (cleanErr) {
+            console.warn('Failed to cleanup exported sender on auth key failure:', cleanErr);
+          }
+          await new Promise((r) => setTimeout(r, 300));
+          continue;
+        }
+
+        if (attempt === 3) throw err;
         await new Promise((r) => setTimeout(r, 300));
       }
     }
@@ -591,7 +611,7 @@ export class TgStreamEngine {
     const totalSize = this.activeStream?.totalSize || 0;
     const plan = planSymmetricRingBuffer(initialTimeSec, durationSec, totalSize);
 
-    // 1-minute window targets
+    // Instant pre-roll window targets (TMPlayer model)
     const targetChunks = plan.chunksToPreload;
     const totalToLoad = Math.max(1, targetChunks.length);
     let completedCount = targetChunks.filter((c) => this.downloadedChunksSet.has(c)).length;
@@ -600,7 +620,7 @@ export class TgStreamEngine {
       Math.min(100, Math.round((completedCount / totalToLoad) * 100)),
       0,
       'Connecting to Telegram cloud...',
-      completedCount / totalToLoad >= 0.5
+      completedCount >= 2 || (totalToLoad <= 2 && completedCount >= 1)
     );
 
     await this.fetchChunksConcurrently(
@@ -611,11 +631,11 @@ export class TgStreamEngine {
         completedCount = count;
         const pct = Math.min(100, Math.round((completedCount / totalToLoad) * 100));
         const lastSpeed = this.getCurrentSpeed();
-        const canStartEarly = pct >= 50;
+        const canStartEarly = completedCount >= 2 || pct >= 50;
         onProgress?.(
           pct,
           lastSpeed,
-          pct < 100 ? `Buffering 1-minute playback window (${pct}%)...` : 'Playback ready',
+          pct < 100 ? `Buffering playback buffer (${pct}%)...` : 'Playback ready',
           canStartEarly
         );
       }

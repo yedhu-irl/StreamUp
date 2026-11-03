@@ -7,7 +7,11 @@ let isRegistered = false;
 let registrationPromise: Promise<boolean> | null = null;
 
 export async function ensureStreamServiceWorker(): Promise<boolean> {
-  if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+  if (
+    typeof window === 'undefined' ||
+    !('serviceWorker' in navigator) ||
+    window.location.protocol === 'file:'
+  ) {
     return false;
   }
 

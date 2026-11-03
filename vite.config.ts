@@ -4,6 +4,7 @@ import { nodePolyfills } from 'vite-plugin-node-polyfills';
 import path from 'path';
 
 export default defineConfig({
+  base: './',
   resolve: {
     preserveSymlinks: true,
     alias: {
@@ -26,6 +27,6 @@ export default defineConfig({
     host: true,
   },
   build: {
-    target: 'esnext',
+    target: ['chrome79', 'es2020'],
   },
 });

@@ -6,6 +6,9 @@ node_modules/
 dist/
 build/
 .dist/
+webos-dist/
+dist-ipk/
+.webos-pack-staging/
 
 # Environment variables, sensitive keys, and credentials
 .env

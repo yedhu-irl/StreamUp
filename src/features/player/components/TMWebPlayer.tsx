@@ -271,20 +271,41 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
   );
 
   // ────────────────────────────────────────────
-  // Keyboard Shortcuts
+  // Keyboard & TV Remote Shortcuts
   // ────────────────────────────────────────────
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' || e.key === 'Backspace' || (e as any).keyCode === 461) {
+      const code = e.keyCode || e.which;
+
+      if (e.key === 'Escape' || e.key === 'Backspace' || code === 461) {
         e.preventDefault();
         if (showControls) {
           setShowControls(false);
           setShowSubMenu(false);
           setShowAudioMenu(false);
           setShowSpeedMenu(false);
+          setShowQualityMenu(false);
         } else {
           onClose();
         }
+      } else if (code === 415 || e.key === 'MediaPlay') {
+        e.preventDefault();
+        actions.play();
+        resetControlsTimeout();
+      } else if (code === 19 || e.key === 'MediaPause') {
+        e.preventDefault();
+        actions.pause();
+        resetControlsTimeout();
+      } else if (code === 413 || e.key === 'MediaStop') {
+        e.preventDefault();
+        actions.pause();
+        onClose();
+      } else if (code === 417 || e.key === 'MediaFastForward') {
+        e.preventDefault();
+        triggerRelativeSeek(30);
+      } else if (code === 412 || e.key === 'MediaRewind') {
+        e.preventDefault();
+        triggerRelativeSeek(-30);
       } else if (e.key === ' ' || e.key === 'k' || e.key === 'Enter') {
         e.preventDefault();
         actions.togglePlay();
@@ -562,7 +583,7 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
             currentTime={currentTime}
             duration={duration}
             totalSize={fileSize}
-            downloadedRanges={[]}
+            bufferedRanges={state.bufferedRanges}
             onSeek={(t) => actions.seekTo(t)}
           />
 

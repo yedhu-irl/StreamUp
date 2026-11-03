@@ -22,6 +22,7 @@ export interface PlayerSessionState {
   isPlaying: boolean;
   currentTime: number;
   duration: number;
+  bufferedRanges: Array<{ start: number; end: number }>;
   isBuffering: boolean;
   playbackStatus: string;
   transferSpeed: number;
@@ -29,6 +30,34 @@ export interface PlayerSessionState {
   playbackError: string | null;
   hasResumePoint: boolean;
   resumeSeconds: number;
+}
+
+const PREBUFFER_TARGET_SEC = 4.0;
+const PREBUFFER_LOW_THRESHOLD = 1.0;
+
+function getForwardBuffer(video: HTMLVideoElement | null): number {
+  if (!video || !video.buffered || video.buffered.length === 0) return 0;
+  const ct = video.currentTime;
+  for (let i = 0; i < video.buffered.length; i++) {
+    const start = video.buffered.start(i);
+    const end = video.buffered.end(i);
+    if (start <= ct + 0.5 && ct <= end) {
+      return Math.max(0, end - ct);
+    }
+  }
+  return 0;
+}
+
+function getBufferedRanges(video: HTMLVideoElement | null): Array<{ start: number; end: number }> {
+  if (!video || !video.buffered) return [];
+  const ranges: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < video.buffered.length; i++) {
+    ranges.push({
+      start: video.buffered.start(i),
+      end: video.buffered.end(i),
+    });
+  }
+  return ranges;
 }
 
 export function usePlayerSession(options: UsePlayerSessionOptions) {
@@ -41,6 +70,7 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
   const [isPlaying, setIsPlaying] = useState<boolean>(false);
   const [currentTime, setCurrentTime] = useState<number>(initialTime);
   const [duration, setDuration] = useState<number>(optDuration);
+  const [bufferedRanges, setBufferedRanges] = useState<Array<{ start: number; end: number }>>([]);
   const [isBuffering, setIsBuffering] = useState<boolean>(true);
   const [playbackStatus, setPlaybackStatus] = useState<string>('Initializing stream...');
   const [transferSpeed, setTransferSpeed] = useState<number>(0);
@@ -51,6 +81,9 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
 
   const lastSavedTimeRef = useRef<number>(0);
   const lastPruneTimeRef = useRef<number>(0);
+  const isWaitingForBufferRef = useRef<boolean>(true);
+  const lastBufferedEndRef = useRef<number>(0);
+  const lastActiveProgressTimestampRef = useRef<number>(Date.now());
 
   // ────────────────────────────────────────────
   // 1. Initial Metadata & Resume Point Discovery
@@ -113,8 +146,8 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
         initialTime: targetStart,
         onReady: (dur) => {
           if (dur > 0) setDuration(dur);
-          setIsBuffering(false);
-          setPlaybackStatus('');
+          isWaitingForBufferRef.current = true;
+          updateBufferedState();
         },
         onStatus: (st) => {
           setPlaybackStatus(st);
@@ -127,15 +160,38 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
 
       playerEngineRef.current = engine;
       await engine.start();
-
-      if (autoPlay) {
-        videoRef.current.play().catch(() => {
-          // Autoplay policy fallback: muted or user interaction required
-        });
-      }
     },
-    [fileId, initialTime, fileName, mimeType, fileSize, metadata, autoPlay]
+    [fileId, initialTime, fileName, mimeType, fileSize, metadata]
   );
+
+  // ────────────────────────────────────────────
+  // Buffer state & cushion regulator (YouTube model)
+  // ────────────────────────────────────────────
+  const updateBufferedState = useCallback(() => {
+    const v = videoRef.current;
+    if (!v) return;
+
+    const ranges = getBufferedRanges(v);
+    setBufferedRanges(ranges);
+
+    const forwardBuf = getForwardBuffer(v);
+    const dur = duration || v.duration || 0;
+    const isNearEnd = dur > 0 && (v.currentTime + forwardBuf >= dur - 0.5);
+
+    if (isWaitingForBufferRef.current) {
+      if (forwardBuf >= PREBUFFER_TARGET_SEC || isNearEnd || dur < 5) {
+        isWaitingForBufferRef.current = false;
+        setIsBuffering(false);
+        setPlaybackStatus('');
+        if (autoPlay || isPlaying) {
+          v.play().catch(() => {});
+        }
+      } else {
+        setIsBuffering(true);
+        setPlaybackStatus(`Buffering (${forwardBuf.toFixed(1)}s / ${PREBUFFER_TARGET_SEC}s)...`);
+      }
+    }
+  }, [duration, autoPlay, isPlaying]);
 
   // ────────────────────────────────────────────
   // Stream Retry Action
@@ -150,6 +206,8 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       setPlaybackError(null);
       setIsBuffering(true);
       setIsStalled(false);
+      isWaitingForBufferRef.current = true;
+      lastActiveProgressTimestampRef.current = Date.now();
       setPlaybackStatus('Reconnecting stream proxy...');
 
       // 1. Clean up previous engine
@@ -172,34 +230,32 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
   );
 
   // ────────────────────────────────────────────
-  // Fatal Stall Watchdog (>20s unrecoverable stall while in PLAYING state)
+  // Non-destructive Stall Watchdog (>35s with 0 bytes & 0 buffer movement)
   // ────────────────────────────────────────────
-  const stallTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   useEffect(() => {
-    if (isPlaying && (isStalled || isBuffering)) {
-      if (!stallTimerRef.current) {
-        stallTimerRef.current = setTimeout(() => {
-          if (isPlaying && (isStalled || isBuffering)) {
-            setPlaybackError('Stream playback stalled (>20s): interrupted data stream');
-            setIsBuffering(false);
-          }
-        }, 20000);
-      }
-    } else {
-      if (stallTimerRef.current) {
-        clearTimeout(stallTimerRef.current);
-        stallTimerRef.current = null;
-      }
-    }
+    if (!isPlaying && !isBuffering) return;
 
-    return () => {
-      if (stallTimerRef.current) {
-        clearTimeout(stallTimerRef.current);
-        stallTimerRef.current = null;
+    const interval = setInterval(() => {
+      const v = videoRef.current;
+      const curBufferedEnd = v && v.buffered.length > 0 ? v.buffered.end(v.buffered.length - 1) : 0;
+
+      // Activity detection: did buffer advance or is data arriving?
+      if (curBufferedEnd > lastBufferedEndRef.current || transferSpeed > 0) {
+        lastBufferedEndRef.current = curBufferedEnd;
+        lastActiveProgressTimestampRef.current = Date.now();
       }
-    };
-  }, [isPlaying, isStalled, isBuffering]);
+
+      if (isBuffering || isStalled) {
+        const deadMs = Date.now() - lastActiveProgressTimestampRef.current;
+        if (deadMs > 35000) {
+          setPlaybackError('Stream playback stalled (>35s): interrupted data stream');
+          setIsBuffering(false);
+        }
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [isPlaying, isBuffering, isStalled, transferSpeed]);
 
   // Initialize engine on video element mount
   useEffect(() => {
@@ -303,6 +359,9 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       if (!v) return;
 
       const clamped = Math.max(0, Math.min(targetSeconds, duration || 999999));
+      isWaitingForBufferRef.current = true;
+      setIsBuffering(true);
+      setPlaybackStatus(`Buffering at ${Math.round(clamped)}s...`);
       playerEngineRef.current?.seek(clamped);
       setCurrentTime(clamped);
       persistCurrentPosition(true);
@@ -336,31 +395,43 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
 
     const ct = v.currentTime;
     setCurrentTime(ct);
+    updateBufferedState();
 
     // Rolling 1-minute buffer pruning every 4 seconds
     if (Math.abs(ct - lastPruneTimeRef.current) >= 4) {
       lastPruneTimeRef.current = ct;
       playerEngineRef.current?.onPlaybackProgress(ct);
     }
-  }, []);
+  }, [updateBufferedState]);
+
+  const onProgress = useCallback(() => {
+    updateBufferedState();
+  }, [updateBufferedState]);
 
   const onLoadedMetadata = useCallback(() => {
     const v = videoRef.current;
     if (v && v.duration) {
       setDuration(v.duration);
     }
-  }, []);
+    updateBufferedState();
+  }, [updateBufferedState]);
 
   const onWaiting = useCallback(() => {
-    setIsBuffering(true);
+    const v = videoRef.current;
+    const forwardBuf = getForwardBuffer(v);
+    if (forwardBuf < PREBUFFER_LOW_THRESHOLD) {
+      isWaitingForBufferRef.current = true;
+      setIsBuffering(true);
+      setPlaybackStatus('Buffering...');
+    }
   }, []);
 
   const onCanPlay = useCallback(() => {
-    setIsBuffering(false);
-    setPlaybackStatus('');
-  }, []);
+    updateBufferedState();
+  }, [updateBufferedState]);
 
   const onPlaying = useCallback(() => {
+    isWaitingForBufferRef.current = false;
     setIsBuffering(false);
     setIsPlaying(true);
     setPlaybackStatus('');
@@ -403,6 +474,7 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       isPlaying,
       currentTime,
       duration,
+      bufferedRanges,
       isBuffering,
       playbackStatus,
       transferSpeed,
@@ -428,6 +500,7 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
     },
     mediaProps: {
       onTimeUpdate,
+      onProgress,
       onLoadedMetadata,
       onWaiting,
       onCanPlay,

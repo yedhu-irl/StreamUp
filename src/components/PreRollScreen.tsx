@@ -81,6 +81,7 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
 
         if (!isMounted) return;
         const dur = item.duration || 0;
+        let hasTriggeredReady = false;
 
         await tgStreamEngine.preloadInitialBuffer(
           streamId,
@@ -91,18 +92,29 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
             setPercent(pct);
             setSpeedBytes(speed);
             setStatusMessage(status);
-            if (earlyReady) setCanStartEarly(true);
+            if (earlyReady) {
+              setCanStartEarly(true);
+              if (!hasTriggeredReady) {
+                hasTriggeredReady = true;
+                setStatusMessage('Buffer ready • Launching player...');
+                timer = setTimeout(() => {
+                  if (isMounted) onReady();
+                }, 150);
+              }
+            }
           }
         );
 
         if (!isMounted) return;
         setPercent(100);
-        setStatusMessage('1-minute buffer ready • Launching player...');
+        setStatusMessage('Buffer ready • Launching player...');
 
-        // Smooth 250ms cross-fade into player
-        timer = setTimeout(() => {
-          if (isMounted) onReady();
-        }, 250);
+        if (!hasTriggeredReady) {
+          hasTriggeredReady = true;
+          timer = setTimeout(() => {
+            if (isMounted) onReady();
+          }, 150);
+        }
       } catch (err: any) {
         console.error('Pre-roll buffering failed:', err);
         if (isMounted) {

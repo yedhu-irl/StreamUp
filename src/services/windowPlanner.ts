@@ -104,17 +104,14 @@ export function planSymmetricRingBuffer(
   let endChunk = 0;
 
   if (currentTimeSec <= 30) {
-    // Initial 0..30s playback: buffer full 60 seconds forward (1 full minute)
-    const ringBytes = Math.max(12 * 1024 * 1024, Math.min(50 * 1024 * 1024, Math.ceil(60 * bytesPerSec)));
-    const forwardChunks = Math.max(12, Math.ceil(ringBytes / CHUNK_SIZE));
+    // Instant start (TMPlayer model): preload initial 2 chunks ahead (~1-1.5 MB total)
+    const forwardChunks = 2;
     startChunk = 0;
     endChunk = Math.min(totalChunks - 1, currentChunk + forwardChunks);
   } else {
-    // Resumed / mid-video playback: symmetric 30s backward + 30s forward (1 full minute total)
-    const ringBytes = Math.max(6 * 1024 * 1024, Math.min(25 * 1024 * 1024, Math.ceil(30 * bytesPerSec)));
-    const ringChunks = Math.max(3, Math.ceil(ringBytes / CHUNK_SIZE));
-    startChunk = Math.max(0, currentChunk - ringChunks);
-    endChunk = Math.min(totalChunks - 1, currentChunk + ringChunks);
+    // Resumed / mid-video playback: 2 chunks forward, 1 chunk backward
+    startChunk = Math.max(0, currentChunk - 1);
+    endChunk = Math.min(totalChunks - 1, currentChunk + 2);
   }
 
   // Pinned chunks: first 2 chunks (container header) and last 2 chunks (moov/Cues)

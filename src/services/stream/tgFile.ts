@@ -223,7 +223,7 @@ export class TgFile {
   }
 
   private scheduleLookahead(baseIndex: number): void {
-    const lookaheadCount = 3; // Keep all 4 MTProto workers fully saturated
+    const lookaheadCount = 2; // Lean lookahead (1 MB) to prevent bandwidth starvation of playhead
     let queueChanged = false;
 
     for (let i = 1; i <= lookaheadCount; i++) {
@@ -270,6 +270,23 @@ export class TgFile {
   }
 
   private drainQueue(): void {
+    // Urgent preemption: If an urgent job is waiting and all workers are busy,
+    // abort the furthest speculative (non-urgent) in-flight job to free an MTProto slot immediately.
+    if (this.jobQueue.length > 0 && this.jobQueue[0].urgent && this.activeWorkers >= this.maxConcurrent) {
+      let furthestSpeculativeJob: Job | null = null;
+      for (const inFlight of this.inFlightJobs.values()) {
+        if (!inFlight.urgent) {
+          if (!furthestSpeculativeJob || inFlight.index > furthestSpeculativeJob.index) {
+            furthestSpeculativeJob = inFlight;
+          }
+        }
+      }
+
+      if (furthestSpeculativeJob) {
+        furthestSpeculativeJob.controller.abort();
+      }
+    }
+
     while (this.activeWorkers < this.maxConcurrent && this.jobQueue.length > 0) {
       const job = this.jobQueue.shift()!;
       this.activeWorkers++;
@@ -297,7 +314,7 @@ export class TgFile {
       return;
     }
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    for (let attempt = 0; attempt < 4; attempt++) {
       if (job.controller.signal.aborted) {
         job.reject(new Error('Operation aborted'));
         return;
@@ -366,7 +383,27 @@ export class TgFile {
           continue;
         }
 
-        if (attempt === 2) {
+        // Handle Unregistered Auth Key on media DC
+        if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || err.code === 401) {
+          console.warn(`Auth key unregistered on DC ${this.dcId}, resetting exported sender and re-authorizing...`);
+          try {
+            if (client.session && typeof client.session.setAuthKey === 'function') {
+              client.session.setAuthKey(undefined, this.dcId);
+            }
+            if (typeof (client as any)._cleanupExportedSender === 'function') {
+              await (client as any)._cleanupExportedSender(this.dcId);
+            }
+            if ((client as any)._exportedSenderPromises?.has?.(this.dcId)) {
+              (client as any)._exportedSenderPromises.delete(this.dcId);
+            }
+          } catch (cleanErr) {
+            console.warn('Failed to cleanup exported sender on auth key failure in TgFile:', cleanErr);
+          }
+          await new Promise((r) => setTimeout(r, 300));
+          continue;
+        }
+
+        if (attempt === 3) {
           job.reject(err);
           return;
         }
