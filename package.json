@@ -7,9 +7,15 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "node tests/run-all.mjs"
+    "test": "node tests/run-all.mjs",
+    "cap:sync": "npm run build && npx cap sync android",
+    "cap:open": "npx cap open android",
+    "build:android": "npm run build && npx cap copy android"
   },
   "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/cli": "^8.6.0",
+    "@capacitor/core": "^8.6.0",
     "buffer": "^6.0.3",
     "dexie": "^4.0.11",
     "lucide-react": "^1.16.0",

@@ -130,7 +130,12 @@ class ChunkFetcher {
     }
   }
 
-  public async fetchChunkByIndex(streamId: string, chunkIndex: number, timeoutMs = 25000): Promise<Uint8Array> {
+  public async fetchChunkByIndex(
+    streamId: string,
+    chunkIndex: number,
+    timeoutMs = 25000,
+    urgent = true
+  ): Promise<Uint8Array> {
     const cacheKey = `${streamId}_${chunkIndex}`;
     const cached = this.prefetchMap.get(cacheKey);
     if (cached) {
@@ -177,6 +182,7 @@ class ChunkFetcher {
           requestId,
           streamId,
           chunkIndex,
+          urgent,
         });
       } else {
         postWorkerMessage({
@@ -184,6 +190,7 @@ class ChunkFetcher {
           requestId,
           streamId,
           chunkIndex,
+          urgent,
         });
       }
     });
@@ -192,25 +199,29 @@ class ChunkFetcher {
     return fetchPromise;
   }
 
-  public prefetchAhead(streamId: string, currentChunk: number, aheadCount = 3): void {
+  /**
+   * TMPlayer-inspired 30-second read-ahead prefetching engine (typically 12-24 chunks = 6-12 MiB).
+   * Fetches at lower priority (urgent = false) so it never starves the active playhead.
+   */
+  public prefetchAhead(streamId: string, currentChunk: number, aheadCount = 20): void {
     const CHUNK_SIZE = 512 * 1024;
     for (let i = 1; i <= aheadCount; i++) {
       const targetChunk = currentChunk + i;
       if (totalFileSize > 0 && targetChunk * CHUNK_SIZE >= totalFileSize) break;
       const key = `${streamId}_${targetChunk}`;
       if (!this.prefetchMap.has(key)) {
-        this.fetchChunkByIndex(streamId, targetChunk).catch(() => {
+        this.fetchChunkByIndex(streamId, targetChunk, 25000, false).catch(() => {
           this.prefetchMap.delete(key);
         });
       }
     }
 
-    // Bound in-memory cache to prevent memory bloat (max 12 chunks)
-    if (this.prefetchMap.size > 12) {
+    // Bound in-memory cache to prevent memory bloat (max 40 chunks = ~20 MiB)
+    if (this.prefetchMap.size > 40) {
       for (const [key] of this.prefetchMap) {
         const parts = key.split('_');
         const idx = Number(parts[parts.length - 1]);
-        if (idx < currentChunk - 1) {
+        if (idx < currentChunk - 2) {
           this.prefetchMap.delete(key);
         }
       }
@@ -470,10 +481,11 @@ async function runStreamLoop(loopId: number) {
         break;
       }
 
-      // Pipelined lookahead prefetching:
-      // Low watermark (<10s) triggers aggressive burst prefetch (3 chunks ahead)
+      // Pipelined lookahead prefetching (TMPlayer 30-second read-ahead model):
+      // Low watermark (<10s) triggers aggressive burst prefetch (24 chunks = 12 MiB ahead)
+      // Normal watermark triggers 16 chunks (8 MiB ahead)
       const isLowWatermark = forwardBufferedSec < LOW_WATERMARK_SEC;
-      const prefetchLookahead = isLowWatermark ? 3 : 2;
+      const prefetchLookahead = isLowWatermark ? 24 : 16;
       const fetchOffset = DownloadWindow.alignOffset(currentReadOffset);
       const currentChunk = Math.floor(fetchOffset / CHUNK_SIZE);
       const streamId = `${activeChannelId}_${activeMessageId}`;
@@ -698,6 +710,29 @@ async function seekTo(targetTimeSec: number) {
   // Align to 4096 bytes
   targetByteOffset = DownloadWindow.alignOffset(targetByteOffset);
   currentReadOffset = targetByteOffset;
+
+  const streamId = `${activeChannelId}_${activeMessageId}`;
+  const targetChunk = Math.floor(targetByteOffset / (512 * 1024));
+
+  // Signal Main Thread & TgFile to cancel far in-flight network jobs immediately
+  if (typeof BroadcastChannel !== 'undefined') {
+    try {
+      const bc = new BroadcastChannel('tg-stream-rpc');
+      bc.postMessage({
+        type: 'CANCEL_SEEK_JOBS',
+        streamId,
+        targetChunk,
+        windowAhead: 32,
+      });
+      bc.close();
+    } catch {}
+  }
+  postWorkerMessage({
+    type: 'CANCEL_SEEK_JOBS',
+    streamId,
+    targetChunk,
+    windowAhead: 32,
+  });
 
   transmuxer?.resetSequence(targetTimeMs);
 

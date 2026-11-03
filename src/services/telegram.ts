@@ -1,10 +1,12 @@
 import { TelegramClient, Api, helpers } from 'telegram';
 import { StringSession } from 'telegram/sessions';
+import { computeCheck } from 'telegram/Password.js';
 import type { 
   TelegramCredentials, 
   ChannelCategory, 
   ChannelVideoItem,
   TelegramUserProfile,
+  VideoQualityOption,
 } from '../types';
 import { parseMediaFileName } from './parser';
 import { fetchTMDBMetadata } from './tmdb';
@@ -76,6 +78,18 @@ export async function sendPhoneCode(phoneNumber: string): Promise<string> {
   return res.phoneCodeHash;
 }
 
+export async function submit2FAPassword(password: string): Promise<string> {
+  if (!globalClient) throw new Error('Telegram client not initialized');
+  const passwordSrpResult = await globalClient.invoke(new Api.account.GetPassword());
+  const passwordSrpCheck = await computeCheck(passwordSrpResult, password);
+  await globalClient.invoke(
+    new Api.auth.CheckPassword({
+      password: passwordSrpCheck,
+    })
+  );
+  return (globalClient.session as StringSession).save();
+}
+
 export async function signInWithPhone(
   phoneNumber: string,
   phoneCodeHash: string,
@@ -97,9 +111,7 @@ export async function signInWithPhone(
       if (!password2FA) {
         throw new Error('2FA_REQUIRED');
       }
-      await (globalClient as any).signInWithPassword({
-        password: password2FA,
-      });
+      return await submit2FAPassword(password2FA);
     } else {
       throw error;
     }
@@ -300,6 +312,31 @@ export async function scanChannelVideos(
             }
           }
 
+          // Extract available qualities if provided by Telegram (altDocuments / transcoded copies)
+          const availableQualities: VideoQualityOption[] = [];
+          const origRes = videoAttr?.h ? `${videoAttr.h}p` : parsed.resolution || 'Original';
+          availableQualities.push({
+            label: `${origRes} (Original)`,
+            resolution: origRes,
+            fileSize: Number(doc.size),
+          });
+
+          const altDocs = (doc as any).altDocuments || (msg.media as any).altDocuments;
+          if (Array.isArray(altDocs)) {
+            for (const alt of altDocs) {
+              if (alt instanceof Api.Document) {
+                const altVid = alt.attributes?.find((a: any) => a instanceof Api.DocumentAttributeVideo) as Api.DocumentAttributeVideo | undefined;
+                const altRes = altVid?.h ? `${altVid.h}p` : 'Compressed';
+                availableQualities.push({
+                  label: `${altRes}`,
+                  resolution: altRes,
+                  fileSize: Number(alt.size),
+                  docId: String(alt.id),
+                });
+              }
+            }
+          }
+
           items.push({
             id: cacheKey,
             channelId,
@@ -312,6 +349,7 @@ export async function scanChannelVideos(
             tmdb: null, // TMDB metadata will be enriched asynchronously
             date: msg.date,
             subtitleMessageId: subId,
+            availableQualities,
           });
 
           if (onProgress) onProgress(items.length);

@@ -42,6 +42,7 @@ export class MSEController {
   private videoPlayheadListener: (() => void) | null = null;
   private videoWaitingListener: (() => void) | null = null;
   private isReadySignaled = false;
+  private streamId = '';
 
   constructor(video: HTMLVideoElement, events: MSEControllerEvents = {}) {
     this.video = video;
@@ -56,6 +57,7 @@ export class MSEController {
   ): Promise<void> {
     this.destroy();
     this.isReadySignaled = false;
+    this.streamId = `${channelId}_${messageId}`;
 
     // Check MSE browser support
     if (typeof window === 'undefined' || !('MediaSource' in window)) {
@@ -238,9 +240,17 @@ export class MSEController {
         break;
       }
 
+      case 'CANCEL_SEEK_JOBS': {
+        const { targetChunk, windowAhead } = msg;
+        if (typeof targetChunk === 'number') {
+          tgStreamEngine.dropFarJobs(Math.max(0, targetChunk - 4), targetChunk + (windowAhead || 32));
+        }
+        break;
+      }
+
       case 'DELEGATE_REQUEST_CHUNK': {
-        const { requestId, streamId, chunkIndex } = msg;
-        tgStreamEngine.getChunk(streamId, chunkIndex)
+        const { requestId, streamId, chunkIndex, urgent } = msg;
+        tgStreamEngine.getChunk(streamId, chunkIndex, undefined, urgent !== false)
           .then((chunk) => {
             this.worker?.postMessage({
               type: 'CHUNK_RESPONSE',
@@ -471,6 +481,11 @@ export class MSEController {
       } catch (e) {
         // ignore
       }
+    }
+
+    // Abort obsolete MTProto downloads in TgFile immediately
+    if (this.streamId) {
+      tgStreamEngine.recenterRingBuffer(this.streamId, targetTimeSec, this.durationSec);
     }
 
     // Retarget worker

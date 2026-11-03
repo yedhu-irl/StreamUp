@@ -96,9 +96,18 @@ export class TgStreamEngine {
             return;
           }
 
+          if (type === 'CANCEL_SEEK_JOBS' && streamId) {
+            const { targetChunk, windowAhead = 32 } = event.data;
+            if (typeof targetChunk === 'number') {
+              this.activeTgFile?.dropFarJobs(Math.max(0, targetChunk - 4), targetChunk + windowAhead);
+            }
+            return;
+          }
+
           if (type === 'REQUEST_CHUNK' && requestId && streamId !== undefined && chunkIndex !== undefined) {
             try {
-              const chunk = await this.getChunk(streamId, chunkIndex);
+              const isUrgent = event.data.urgent !== false;
+              const chunk = await this.getChunk(streamId, chunkIndex, undefined, isUrgent);
               this.rpcChannel?.postMessage({
                 type: 'CHUNK_RESPONSE',
                 requestId,
@@ -278,7 +287,8 @@ export class TgStreamEngine {
   public async getChunk(
     streamId: string,
     chunkIndex: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    urgent = true
   ): Promise<Uint8Array> {
     // Fast-path: Unified virtual TgFile (parallel 4-worker pipeline)
     let tgFile = this.activeTgFile;
@@ -291,7 +301,7 @@ export class TgStreamEngine {
     }
 
     if (tgFile && tgFile.streamId === streamId) {
-      const u8 = await tgFile.getChunk(chunkIndex, true);
+      const u8 = await tgFile.getChunk(chunkIndex, urgent);
       this.recordBytesReceived(u8.byteLength);
       this.downloadedChunksSet.add(chunkIndex);
       return u8;
@@ -549,7 +559,7 @@ export class TgStreamEngine {
         const next = queue.shift();
         if (next === undefined) break;
         try {
-          await this.getChunk(streamId, next);
+          await this.getChunk(streamId, next, undefined, false);
         } catch (e) {
           console.warn(`Concurrent chunk ${next} fetch warning:`, e);
         }
@@ -637,6 +647,10 @@ export class TgStreamEngine {
     );
   }
 
+  public dropFarJobs(startChunk: number, endChunk: number): void {
+    this.activeTgFile?.dropFarJobs(startChunk, endChunk);
+  }
+
   /**
    * Recenter 1-minute rolling buffer [target - 30s, target + 30s] on user seek / jump.
    * Evicts chunks outside window from RAM and IndexedDB, and downloads forward from target chunk.
@@ -671,7 +685,7 @@ export class TgStreamEngine {
     for (const c of toFetch) {
       const controller = new AbortController();
       this.activePrefetchControllers.push(controller);
-      this.getChunk(streamId, c, controller.signal).catch(() => {});
+      this.getChunk(streamId, c, controller.signal, false).catch(() => {});
     }
   }
 

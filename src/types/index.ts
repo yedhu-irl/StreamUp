@@ -64,6 +64,13 @@ export interface TMDBMediaMetadata {
   totalSeasons?: number;
 }
 
+export interface VideoQualityOption {
+  label: string; // "1080p", "720p", "480p", "Original"
+  resolution?: string;
+  fileSize?: number;
+  docId?: string;
+}
+
 export interface ChannelVideoItem {
   id: string; // `${channelId}_${messageId}`
   channelId: string;
@@ -76,6 +83,7 @@ export interface ChannelVideoItem {
   tmdb: TMDBMediaMetadata | null;
   date: number;
   subtitleMessageId?: number; // Optional matched .srt message
+  availableQualities?: VideoQualityOption[];
 }
 
 export interface SeriesEpisode {

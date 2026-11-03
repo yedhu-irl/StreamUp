@@ -6,9 +6,21 @@ import {
   initTelegramClient, 
   startQRLogin, 
   sendPhoneCode, 
-  signInWithPhone 
+  signInWithPhone,
+  submit2FAPassword
 } from '../services/telegram';
 import { saveStoredCredentials, saveStoredSession, getStoredCredentials } from '../services/db';
+
+function isMobileView(): boolean {
+  if (typeof window === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isTV = /TV|SmartTV|GoogleTV|AppleTV|HbbTV|NetCast|BRAVIA/i.test(ua);
+  if (isTV) return false;
+  const isMobileUA = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
+  const isTouch = 'ontouchstart' in window || (typeof navigator !== 'undefined' && (navigator.maxTouchPoints ?? 0) > 0);
+  const isSmallScreen = window.innerWidth <= 768 && isTouch;
+  return Boolean(isMobileUA || isSmallScreen);
+}
 
 interface AuthModalProps {
   onSuccess: () => void;
@@ -16,8 +28,9 @@ interface AuthModalProps {
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
+  const [isMobile] = useState<boolean>(() => isMobileView());
   const [step, setStep] = useState<'creds' | 'login'>('creds');
-  const [loginMethod, setLoginMethod] = useState<'qr' | 'phone'>('qr');
+  const [loginMethod, setLoginMethod] = useState<'qr' | 'phone'>(() => isMobileView() ? 'phone' : 'qr');
 
   // Credentials State
   const [apiId, setApiId] = useState<string>('');
@@ -49,12 +62,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
         setApiId(creds.apiId.toString());
         setApiHash(creds.apiHash);
         setStep('login');
-        setLoginMethod('qr');
+        const mobile = isMobileView();
+        setLoginMethod(mobile ? 'phone' : 'qr');
         try {
           await initTelegramClient(creds);
-          initiateQRLogin();
+          if (!mobile) {
+            initiateQRLogin();
+          }
         } catch (err: any) {
-          setQrError(err.message || 'Failed connecting to Telegram.');
+          if (!mobile) {
+            setQrError(err.message || 'Failed connecting to Telegram.');
+          }
         }
       }
     }
@@ -78,7 +96,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
     try {
       await initTelegramClient(creds);
       setStep('login');
-      if (loginMethod === 'qr') {
+      const mobile = isMobileView();
+      setLoginMethod(mobile ? 'phone' : 'qr');
+      if (!mobile && loginMethod === 'qr') {
         initiateQRLogin();
       }
     } catch (err: any) {
@@ -156,18 +176,29 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
 
   const handleVerifyPhoneCode = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phoneCodeHash || !otpCode) return;
+    if (!phoneCodeHash) return;
+    if (!needs2FA && !otpCode) return;
 
     setPhoneLoading(true);
     setPhoneError(null);
 
     try {
-      const sessionString = await signInWithPhone(
-        phoneNumber.trim(),
-        phoneCodeHash,
-        otpCode.trim(),
-        password2FA ? password2FA.trim() : undefined
-      );
+      let sessionString: string;
+      if (needs2FA) {
+        if (!password2FA) {
+          setPhoneError('Please enter your 2-Step Verification password.');
+          setPhoneLoading(false);
+          return;
+        }
+        sessionString = await submit2FAPassword(password2FA.trim());
+      } else {
+        sessionString = await signInWithPhone(
+          phoneNumber.trim(),
+          phoneCodeHash,
+          otpCode.trim(),
+          password2FA ? password2FA.trim() : undefined
+        );
+      }
 
       await saveStoredSession({
         stringSession: sessionString,
@@ -176,8 +207,15 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
 
       onSuccess();
     } catch (err: any) {
-      if (err.message === '2FA_REQUIRED') {
+      if (err.message === '2FA_REQUIRED' || err.errorMessage === 'SESSION_PASSWORD_NEEDED') {
         setNeeds2FA(true);
+        setPhoneError(null);
+      } else if (err.errorMessage === 'PASSWORD_HASH_INVALID') {
+        setPhoneError('Incorrect 2-Step Verification password. Please try again.');
+      } else if (err.errorMessage === 'PHONE_CODE_INVALID') {
+        setPhoneError('Invalid verification code. Please check and try again.');
+      } else if (err.errorMessage === 'PHONE_CODE_EXPIRED') {
+        setPhoneError('Verification code expired. Please request a new code.');
       } else {
         setPhoneError(err.message || 'Invalid code or authentication error.');
       }
@@ -275,39 +313,41 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
         {/* Step 2: Login Options (QR Code vs Phone) */}
         {step === 'login' && (
           <div className="space-y-6">
-            {/* Segmented Control Pill Tabs */}
-            <div className="grid grid-cols-2 p-1 rounded-full bg-white/10 border border-white/10 text-xs font-semibold">
-              <button
-                type="button"
-                onClick={() => {
-                  setLoginMethod('qr');
-                  if (!qrCodeDataUrl && !qrLoading) initiateQRLogin();
-                }}
-                className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
-                  loginMethod === 'qr'
-                    ? 'bg-white text-black shadow-md'
-                    : 'text-white/70 hover:text-white'
-                }`}
-              >
-                <QrCode className="w-4 h-4" />
-                <span>QR Code</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => setLoginMethod('phone')}
-                className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
-                  loginMethod === 'phone'
-                    ? 'bg-white text-black shadow-md'
-                    : 'text-white/70 hover:text-white'
-                }`}
-              >
-                <Phone className="w-4 h-4" />
-                <span>Phone + OTP</span>
-              </button>
-            </div>
+            {/* Segmented Control Pill Tabs - shown on desktop / TV only */}
+            {!isMobile && (
+              <div className="grid grid-cols-2 p-1 rounded-full bg-white/10 border border-white/10 text-xs font-semibold">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLoginMethod('qr');
+                    if (!qrCodeDataUrl && !qrLoading) initiateQRLogin();
+                  }}
+                  className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
+                    loginMethod === 'qr'
+                      ? 'bg-white text-black shadow-md'
+                      : 'text-white/70 hover:text-white'
+                  }`}
+                >
+                  <QrCode className="w-4 h-4" />
+                  <span>QR Code</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setLoginMethod('phone')}
+                  className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
+                    loginMethod === 'phone'
+                      ? 'bg-white text-black shadow-md'
+                      : 'text-white/70 hover:text-white'
+                  }`}
+                >
+                  <Phone className="w-4 h-4" />
+                  <span>Phone + OTP</span>
+                </button>
+              </div>
+            )}
 
-            {/* QR Code Tab */}
-            {loginMethod === 'qr' && (
+            {/* QR Code Tab (desktop / TV only) */}
+            {!isMobile && loginMethod === 'qr' && (
               qrNeeds2FA ? (
                 <form onSubmit={handleQr2FASubmit} className="space-y-4 animate-scale-in">
                   <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center space-y-2">
@@ -406,8 +446,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
               )
             )}
 
-            {/* Phone + OTP Tab */}
-            {loginMethod === 'phone' && (
+            {/* Phone + OTP Tab (Mobile default or desktop selected) */}
+            {(isMobile || loginMethod === 'phone') && (
               <div className="space-y-4">
                 {!phoneCodeHash ? (
                   <form onSubmit={handleSendPhoneCode} className="space-y-4">
@@ -415,6 +455,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
                       <label className="text-xs font-semibold text-white/80">Phone Number (with Country Code)</label>
                       <input
                         type="tel"
+                        autoFocus
                         placeholder="+1 234 567 8900"
                         value={phoneNumber}
                         onChange={(e) => setPhoneNumber(e.target.value)}
@@ -440,29 +481,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
                   </form>
                 ) : (
                   <form onSubmit={handleVerifyPhoneCode} className="space-y-4">
-                    <div className="space-y-1.5">
-                      <label className="text-xs font-semibold text-white/80">Telegram Verification Code</label>
-                      <input
-                        type="text"
-                        placeholder="12345"
-                        value={otpCode}
-                        onChange={(e) => setOtpCode(e.target.value)}
-                        required
-                        className="w-full px-4 py-3 rounded-2xl bg-white/10 border border-white/15 focus:border-white text-sm text-white tracking-widest text-center font-mono focus:outline-none"
-                      />
-                    </div>
-
-                    {needs2FA && (
+                    {!needs2FA ? (
                       <div className="space-y-1.5">
-                        <label className="text-xs font-semibold text-white/80">2-Step Verification Password</label>
+                        <label className="text-xs font-semibold text-white/80">Telegram Verification Code</label>
                         <input
-                          type="password"
-                          placeholder="Your 2FA password"
-                          value={password2FA}
-                          onChange={(e) => setPassword2FA(e.target.value)}
+                          type="text"
+                          autoFocus
+                          placeholder="12345"
+                          value={otpCode}
+                          onChange={(e) => setOtpCode(e.target.value)}
                           required
-                          className="w-full px-4 py-3 rounded-2xl bg-white/10 border border-white/15 focus:border-white text-sm text-white focus:outline-none"
+                          className="w-full px-4 py-3 rounded-2xl bg-white/10 border border-white/15 focus:border-white text-sm text-white tracking-widest text-center font-mono focus:outline-none"
                         />
+                      </div>
+                    ) : (
+                      <div className="space-y-4 animate-scale-in">
+                        <div className="p-3.5 rounded-2xl bg-white/5 border border-white/10 text-center space-y-1">
+                          <div className="inline-flex p-2 rounded-xl bg-white/10 text-white mb-1">
+                            <Key className="w-4 h-4" />
+                          </div>
+                          <h4 className="font-bold text-sm text-white">Two-Step Verification</h4>
+                          <p className="text-xs text-white/60">
+                            Enter your Telegram Cloud 2FA Password to complete sign in.
+                          </p>
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <label className="text-xs font-semibold text-white/80">2FA Password</label>
+                          <input
+                            type="password"
+                            autoFocus
+                            placeholder="Enter 2FA password"
+                            value={password2FA}
+                            onChange={(e) => setPassword2FA(e.target.value)}
+                            required
+                            className="w-full px-4 py-3 rounded-2xl bg-white/10 border border-white/15 focus:border-white text-sm text-white focus:outline-none"
+                          />
+                        </div>
                       </div>
                     )}
 
@@ -478,8 +533,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
                       disabled={phoneLoading}
                       className="w-full py-3.5 rounded-full bg-white hover:bg-white/90 active:scale-95 text-black font-semibold text-sm shadow-xl transition-all flex items-center justify-center space-x-2"
                     >
-                      {phoneLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <span>Sign In</span>}
+                      {phoneLoading ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <span>{needs2FA ? 'Confirm 2FA & Sign In' : 'Sign In'}</span>
+                      )}
                     </button>
+
+                    <div className="text-center pt-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPhoneCodeHash(null);
+                          setOtpCode('');
+                          setPassword2FA('');
+                          setNeeds2FA(false);
+                          setPhoneError(null);
+                        }}
+                        className="text-xs text-white/50 hover:text-white transition-colors"
+                      >
+                        Change Phone Number
+                      </button>
+                    </div>
                   </form>
                 )}
               </div>

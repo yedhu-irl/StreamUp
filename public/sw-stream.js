@@ -2,7 +2,7 @@
 // Dedicated Service Worker HTTP 206 Partial Content Range Proxy for Telegram Video Streams
 
 const CHUNK_SIZE = 512 * 1024; // 524,288 bytes (strictly 512 KB)
-const MAX_RANGE_WINDOW = 4 * CHUNK_SIZE; // 2 MB window cap on open-ended ranges
+const MAX_RANGE_WINDOW = 64 * CHUNK_SIZE; // 32 MB window cap on open-ended ranges (prevents socket churn)
 
 self.addEventListener('install', () => {
   self.skipWaiting();

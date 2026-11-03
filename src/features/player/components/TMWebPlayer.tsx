@@ -92,6 +92,8 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
   const [showSubMenu, setShowSubMenu] = useState<boolean>(false);
   const [showAudioMenu, setShowAudioMenu] = useState<boolean>(false);
   const [showSpeedMenu, setShowSpeedMenu] = useState<boolean>(false);
+  const [showQualityMenu, setShowQualityMenu] = useState<boolean>(false);
+  const [selectedQuality, setSelectedQuality] = useState<string>('Auto');
 
   // Subtitles & Audio Tracks
   const [subtitles, setSubtitles] = useState<SubtitleTrack[]>([]);
@@ -723,6 +725,53 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
                   )}
                 </div>
               )}
+
+              {/* TMPlayer Quality Selector */}
+              <div className="relative">
+                <button
+                  onClick={() => setShowQualityMenu(!showQualityMenu)}
+                  className="px-2 py-1 rounded-full hover:bg-white/15 text-xs font-semibold text-white/80 hover:text-white transition-all uppercase"
+                  title="Quality Selection"
+                >
+                  {selectedQuality}
+                </button>
+
+                {showQualityMenu && (
+                  <div className="absolute bottom-11 right-0 w-44 p-2 rounded-2xl bg-[#1c1c1f]/95 border border-white/15 shadow-2xl backdrop-blur-2xl text-xs space-y-1 z-50">
+                    <p className="px-3 py-1 text-[10px] uppercase font-bold text-white/40 tracking-wider">Quality</p>
+                    <button
+                      onClick={() => {
+                        setSelectedQuality('Auto');
+                        setShowQualityMenu(false);
+                      }}
+                      className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all ${
+                        selectedQuality === 'Auto' ? 'bg-white/15 text-white font-semibold' : 'text-white/70 hover:bg-white/10'
+                      }`}
+                    >
+                      <span>Auto (1.3× Headroom)</span>
+                      {selectedQuality === 'Auto' && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                    </button>
+                    {(item.availableQualities && item.availableQualities.length > 0
+                      ? item.availableQualities
+                      : [{ label: `${item.parsed.resolution || 'Original'}` }]
+                    ).map((q, idx) => (
+                      <button
+                        key={idx}
+                        onClick={() => {
+                          setSelectedQuality(q.label);
+                          setShowQualityMenu(false);
+                        }}
+                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all ${
+                          selectedQuality === q.label ? 'bg-white/15 text-white font-semibold' : 'text-white/70 hover:bg-white/10'
+                        }`}
+                      >
+                        <span className="truncate">{q.label}</span>
+                        {selectedQuality === q.label && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
 
               {/* Playback Speed Button */}
               <div className="relative">
