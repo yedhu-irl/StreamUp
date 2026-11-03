@@ -11,26 +11,14 @@ import {
 } from '../services/telegram';
 import { saveStoredCredentials, saveStoredSession, getStoredCredentials } from '../services/db';
 
-function isMobileView(): boolean {
-  if (typeof window === 'undefined') return false;
-  const ua = navigator.userAgent || '';
-  const isTV = /TV|SmartTV|GoogleTV|AppleTV|HbbTV|NetCast|BRAVIA/i.test(ua);
-  if (isTV) return false;
-  const isMobileUA = /Android|iPhone|iPad|iPod|webOS|BlackBerry|IEMobile|Opera Mini/i.test(ua);
-  const isTouch = 'ontouchstart' in window || (typeof navigator !== 'undefined' && (navigator.maxTouchPoints ?? 0) > 0);
-  const isSmallScreen = window.innerWidth <= 768 && isTouch;
-  return Boolean(isMobileUA || isSmallScreen);
-}
-
 interface AuthModalProps {
   onSuccess: () => void;
   onClose?: () => void;
 }
 
 export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
-  const [isMobile] = useState<boolean>(() => isMobileView());
   const [step, setStep] = useState<'creds' | 'login'>('creds');
-  const [loginMethod, setLoginMethod] = useState<'qr' | 'phone'>(() => isMobileView() ? 'phone' : 'qr');
+  const [loginMethod, setLoginMethod] = useState<'qr' | 'phone'>('qr');
 
   // Credentials State
   const [apiId, setApiId] = useState<string>('');
@@ -62,17 +50,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
         setApiId(creds.apiId.toString());
         setApiHash(creds.apiHash);
         setStep('login');
-        const mobile = isMobileView();
-        setLoginMethod(mobile ? 'phone' : 'qr');
+        setLoginMethod('qr');
         try {
           await initTelegramClient(creds);
-          if (!mobile) {
-            initiateQRLogin();
-          }
+          initiateQRLogin();
         } catch (err: any) {
-          if (!mobile) {
-            setQrError(err.message || 'Failed connecting to Telegram.');
-          }
+          setQrError(err.message || 'Failed connecting to Telegram.');
         }
       }
     }
@@ -96,9 +79,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
     try {
       await initTelegramClient(creds);
       setStep('login');
-      const mobile = isMobileView();
-      setLoginMethod(mobile ? 'phone' : 'qr');
-      if (!mobile && loginMethod === 'qr') {
+      if (loginMethod === 'qr') {
         initiateQRLogin();
       }
     } catch (err: any) {
@@ -313,41 +294,39 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
         {/* Step 2: Login Options (QR Code vs Phone) */}
         {step === 'login' && (
           <div className="space-y-6">
-            {/* Segmented Control Pill Tabs - shown on desktop / TV only */}
-            {!isMobile && (
-              <div className="grid grid-cols-2 p-1 rounded-full bg-white/10 border border-white/10 text-xs font-semibold">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setLoginMethod('qr');
-                    if (!qrCodeDataUrl && !qrLoading) initiateQRLogin();
-                  }}
-                  className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
-                    loginMethod === 'qr'
-                      ? 'bg-white text-black shadow-md'
-                      : 'text-white/70 hover:text-white'
-                  }`}
-                >
-                  <QrCode className="w-4 h-4" />
-                  <span>QR Code</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setLoginMethod('phone')}
-                  className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
-                    loginMethod === 'phone'
-                      ? 'bg-white text-black shadow-md'
-                      : 'text-white/70 hover:text-white'
-                  }`}
-                >
-                  <Phone className="w-4 h-4" />
-                  <span>Phone + OTP</span>
-                </button>
-              </div>
-            )}
+            {/* Segmented Control Pill Tabs */}
+            <div className="grid grid-cols-2 p-1 rounded-full bg-white/10 border border-white/10 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => {
+                  setLoginMethod('qr');
+                  if (!qrCodeDataUrl && !qrLoading) initiateQRLogin();
+                }}
+                className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
+                  loginMethod === 'qr'
+                    ? 'bg-white text-black shadow-md'
+                    : 'text-white/70 hover:text-white'
+                }`}
+              >
+                <QrCode className="w-4 h-4" />
+                <span>QR Code</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setLoginMethod('phone')}
+                className={`py-2 rounded-full flex items-center justify-center space-x-1.5 transition-all ${
+                  loginMethod === 'phone'
+                    ? 'bg-white text-black shadow-md'
+                    : 'text-white/70 hover:text-white'
+                }`}
+              >
+                <Phone className="w-4 h-4" />
+                <span>Phone + OTP</span>
+              </button>
+            </div>
 
-            {/* QR Code Tab (desktop / TV only) */}
-            {!isMobile && loginMethod === 'qr' && (
+            {/* QR Code Tab */}
+            {loginMethod === 'qr' && (
               qrNeeds2FA ? (
                 <form onSubmit={handleQr2FASubmit} className="space-y-4 animate-scale-in">
                   <div className="p-4 rounded-2xl bg-white/5 border border-white/10 text-center space-y-2">
@@ -446,8 +425,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({ onSuccess, onClose }) => {
               )
             )}
 
-            {/* Phone + OTP Tab (Mobile default or desktop selected) */}
-            {(isMobile || loginMethod === 'phone') && (
+            {/* Phone + OTP Tab */}
+            {loginMethod === 'phone' && (
               <div className="space-y-4">
                 {!phoneCodeHash ? (
                   <form onSubmit={handleSendPhoneCode} className="space-y-4">
