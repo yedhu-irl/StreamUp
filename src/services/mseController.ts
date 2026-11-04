@@ -622,7 +622,10 @@ export class MSEController {
     if (this.isReadySignaled || !this.isSourceOpen) return;
     if (!this.video || !this.sourceBuffer) return;
 
-    // W3C: video.buffered has valid range only when all active SourceBuffers have data at that range
+    const hasVideo = this.sourceBuffer.buffered && this.sourceBuffer.buffered.length > 0;
+    const hasAudio = !this.audioSourceBuffer || (this.audioSourceBuffer.buffered && this.audioSourceBuffer.buffered.length > 0);
+
+    // Case 1: Browser video.buffered has valid intersection range
     if (this.video.buffered && this.video.buffered.length > 0) {
       const startPts = this.video.buffered.start(0);
 
@@ -637,30 +640,54 @@ export class MSEController {
 
       this.isReadySignaled = true;
       this.events.onReady?.(this.durationSec);
+    } else if (hasVideo && hasAudio) {
+      // Case 2: W3C multi-track intersection fallback: when audio starts at small PTS offset (e.g. 50-200ms)
+      const vStart = this.sourceBuffer.buffered.start(0);
+      const aStart = this.audioSourceBuffer?.buffered?.length ? this.audioSourceBuffer.buffered.start(0) : vStart;
+      const effectiveStart = Math.max(vStart, aStart);
+
+      if (this.video.currentTime < effectiveStart) {
+        try {
+          this.video.currentTime = effectiveStart;
+        } catch (e) {
+          console.warn('Failed to bridge multi-track PTS gap:', e);
+        }
+      }
+
+      this.isReadySignaled = true;
+      this.events.onReady?.(this.durationSec);
     }
   }
 
   /**
-   * Micro-gap jumper to recover from sub-frame stalls (<500ms) across cluster boundaries or lead-in offset
+   * Micro-gap jumper to recover from sub-frame stalls (<1000ms) across cluster boundaries or lead-in offset
    */
   public bridgeBufferGap(): void {
-    if (!this.video || !this.video.buffered || this.video.buffered.length === 0) return;
+    if (!this.video) return;
+
+    // Check video.buffered first, then fall back to sourceBuffer.buffered
+    const ranges = (this.video.buffered && this.video.buffered.length > 0)
+      ? this.video.buffered
+      : this.sourceBuffer?.buffered;
+
+    if (!ranges || ranges.length === 0) return;
+
     const ct = this.video.currentTime;
-    for (let i = 0; i < this.video.buffered.length; i++) {
-      const start = this.video.buffered.start(i);
-      // Case 1: Playhead is behind start of buffered range by < 0.5s
-      if (ct < start && (start - ct) < 0.5) {
+    for (let i = 0; i < ranges.length; i++) {
+      const start = ranges.start(i);
+      // Case 1: Playhead is behind start of buffered range by < 1.0s
+      if (ct < start && (start - ct) < 1.0) {
         try {
           this.video.currentTime = start;
         } catch (e) {}
         return;
       }
-      // Case 2: Playhead is at the end of range i, and next range (i + 1) starts within 0.5s
-      const end = this.video.buffered.end(i);
-      if (i + 1 < this.video.buffered.length) {
-        const nextStart = this.video.buffered.start(i + 1);
+      // Case 2: Playhead is at the end of range i, and next range (i + 1) starts within 1.0s
+      const end = ranges.end(i);
+      if (i + 1 < ranges.length) {
+        const nextStart = ranges.start(i + 1);
         const gap = nextStart - end;
-        if (gap > 0 && gap < 0.5 && ct >= end - 0.1 && ct <= nextStart) {
+        if (gap > 0 && gap < 1.0 && ct >= end - 0.2 && ct <= nextStart) {
           try {
             this.video.currentTime = nextStart;
           } catch (e) {}

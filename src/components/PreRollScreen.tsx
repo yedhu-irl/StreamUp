@@ -56,13 +56,15 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
     let timer: any = null;
     let hasTriggeredReady = false;
 
-    // Fallback timer: Show Play Now button after 4s, and auto-proceed after 8s
+    let isStreamRegistered = false;
+
+    // Fallback timer: Show Play Now button after 4s, and auto-proceed after 8s if registered
     const playNowTimer = setTimeout(() => {
       if (isMounted) setShowPlayNow(true);
     }, 4000);
 
     const autoProceedTimer = setTimeout(() => {
-      if (isMounted && !hasTriggeredReady) {
+      if (isMounted && !hasTriggeredReady && isStreamRegistered) {
         hasTriggeredReady = true;
         setStatusMessage('Launching player...');
         onReady();
@@ -93,6 +95,7 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
           fileName,
           cached.mimeType || 'video/mp4'
         );
+        isStreamRegistered = true;
 
         if (!isMounted) return;
         const dur = item.duration || 0;

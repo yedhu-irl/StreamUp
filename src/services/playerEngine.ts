@@ -252,6 +252,12 @@ export class PlayerEngine {
     }
   }
 
+  public bridgeBufferGap(): void {
+    if (this.activePath === 'mse') {
+      this.mseController?.bridgeBufferGap();
+    }
+  }
+
   /**
    * Periodic playback progress hook:
    * Prunes chunks outside [currentTime - 30s, currentTime + 30s] to enforce 1-minute rolling window.

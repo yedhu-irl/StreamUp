@@ -1,6 +1,6 @@
 export const BUILD_INFO = {
   author: 'yedhu',
   version: '1.0.0',
-  commit: 'b1f8e24',
-  commitName: 'fix(player): resolve chunk 0 timeout, container subtitles, and stream session healing',
+  commit: '3f9d12a',
+  commitName: 'fix(stream): resolve auth key unregister, document location healing, and mse stall watchdog',
 };

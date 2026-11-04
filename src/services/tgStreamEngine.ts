@@ -413,6 +413,29 @@ export class TgStreamEngine {
     let location = this.activeStream?.location;
 
     if (!location) {
+      const parts = streamId.split('_');
+      if (parts.length >= 2) {
+        const chatId = parts[0];
+        const messageId = parseInt(parts[1], 10);
+        if (!isNaN(messageId)) {
+          try {
+            const cached = await resolveCachedDocument(chatId, messageId);
+            if (cached?.location) {
+              location = cached.location;
+              dcId = (cached.doc as any)?.dcId || dcId;
+              if (this.activeStream) {
+                this.activeStream.location = cached.location;
+                this.activeStream.dcId = dcId;
+              }
+            }
+          } catch (e) {
+            console.warn('Auto-heal location in downloadChunkFromTelegram failed:', e);
+          }
+        }
+      }
+    }
+
+    if (!location) {
       throw new Error('Active stream document location missing');
     }
 
@@ -486,22 +509,30 @@ export class TgStreamEngine {
         if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || err.code === 401) {
           console.warn(`Auth key unregistered on DC ${dcId}, resetting exported sender and re-authorizing...`);
           try {
-            if (client.session && typeof client.session.setAuthKey === 'function') {
-              client.session.setAuthKey(undefined, dcId);
-            }
-            if (typeof (client as any)._removeSender === 'function') {
-              (client as any)._removeSender(dcId);
-            }
-            if ((client as any)._exportedSenderPromises?.has?.(dcId)) {
-              (client as any)._exportedSenderPromises.delete(dcId);
-            }
-            if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[dcId]) {
-              delete (client as any)._borrowedSenderPromises[dcId];
+            if (dcId && (client as any).session?.dcId !== dcId) {
+              if (typeof (client as any)._cleanupExportedSender === 'function') {
+                await (client as any)._cleanupExportedSender(dcId);
+              } else {
+                if (typeof (client as any)._removeSender === 'function') {
+                  (client as any)._removeSender(dcId);
+                }
+                if ((client as any)._exportedSenderPromises?.has?.(dcId)) {
+                  (client as any)._exportedSenderPromises.delete(dcId);
+                }
+                if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[dcId]) {
+                  delete (client as any)._borrowedSenderPromises[dcId];
+                }
+              }
+            } else {
+              // Master DC: NEVER wipe auth key! Reconnect socket if dropped.
+              if (typeof (client as any).connect === 'function') {
+                await (client as any).connect().catch(() => {});
+              }
             }
           } catch (cleanErr) {
             console.warn('Failed to cleanup exported sender on auth key failure:', cleanErr);
           }
-          await new Promise((r) => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, 400));
           continue;
         }
 

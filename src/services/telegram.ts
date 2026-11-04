@@ -10,7 +10,7 @@ import type {
 } from '../types';
 import { parseMediaFileName } from './parser';
 import { fetchTMDBMetadata } from './tmdb';
-import { db } from './db';
+import { db, getStoredSession } from './db';
 
 let globalClient: TelegramClient | null = null;
 let currentCredentials: TelegramCredentials | null = null;
@@ -39,7 +39,8 @@ export async function initTelegramClient(
 
   // In browser, GramJS automatically uses WebSocket
   const client = new TelegramClient(stringSession, credentials.apiId, credentials.apiHash, {
-    connectionRetries: 5,
+    connectionRetries: 20,
+    autoReconnect: true,
     useWSS: true,
     deviceModel: 'StreamUp Web',
     systemVersion: typeof navigator !== 'undefined' ? (navigator.userAgent || 'WebOS / Browser') : 'Web 1.0',
@@ -438,18 +439,50 @@ function notifyTransferSpeed(bytes: number, durationMs: number) {
   }
 }
 
+export async function ensureClientSessionAlive(): Promise<void> {
+  if (globalClient) {
+    const hasKey = typeof globalClient.session?.getAuthKey === 'function' ? !!globalClient.session.getAuthKey()?.getKey() : true;
+    if (!hasKey) {
+      const stored = await getStoredSession();
+      if (stored?.stringSession) {
+        console.warn('Restoring missing auth key from stored session string...');
+        const s = new StringSession(stored.stringSession);
+        (globalClient as any).session = s;
+        await globalClient.connect().catch(() => {});
+      }
+    }
+  }
+}
+
+const inFlightDocumentResolutions = new Map<string, Promise<any>>();
+
 export async function resolveCachedDocument(channelId: string, messageId: number) {
   const cacheKey = `${channelId}_${messageId}`;
   let cached = cachedDocuments.get(cacheKey);
+  if (cached) return cached;
 
-  if (!cached && globalClient) {
+  if (inFlightDocumentResolutions.has(cacheKey)) {
+    return inFlightDocumentResolutions.get(cacheKey);
+  }
+
+  const resolvePromise = (async () => {
+    await ensureClientSessionAlive();
+    if (!globalClient) return undefined;
+
     try {
       let peer: any;
       try {
         peer = await globalClient.getInputEntity(channelId);
       } catch (entityErr) {
         // Look up channel in Dexie db.channels to get accessHash
-        const ch = await db.channels.get(channelId);
+        let ch = await db.channels.get(channelId);
+        if (!ch && channelId.startsWith('-100')) {
+          ch = await db.channels.get(channelId.replace(/^-100/, ''));
+        }
+        if (!ch && !channelId.startsWith('-100')) {
+          ch = await db.channels.get(`-100${channelId}`);
+        }
+
         if (ch && ch.accessHash) {
           const rawId = channelId.replace(/^-100/, '');
           peer = new Api.InputPeerChannel({
@@ -457,7 +490,7 @@ export async function resolveCachedDocument(channelId: string, messageId: number
             accessHash: helpers.returnBigInt(ch.accessHash),
           });
         } else {
-          await globalClient.getDialogs({ limit: 100 });
+          await globalClient.getDialogs({ limit: 100 }).catch(() => []);
           peer = await globalClient.getInputEntity(channelId);
         }
       }
@@ -472,20 +505,26 @@ export async function resolveCachedDocument(channelId: string, messageId: number
             fileReference: doc.fileReference,
             thumbSize: '',
           });
-          cached = {
+          const res = {
             doc,
             location: inputLoc,
             size: Number(doc.size),
             mimeType: doc.mimeType || 'video/mp4',
           };
-          cachedDocuments.set(cacheKey, cached);
+          cachedDocuments.set(cacheKey, res);
+          return res;
         }
       }
     } catch (err) {
       console.error('Error resolving document on demand:', err);
+    } finally {
+      inFlightDocumentResolutions.delete(cacheKey);
     }
-  }
-  return cached;
+    return undefined;
+  })();
+
+  inFlightDocumentResolutions.set(cacheKey, resolvePromise);
+  return resolvePromise;
 }
 
 export function prewarmDocument(channelId: string, messageId: number) {
@@ -589,22 +628,29 @@ async function processStreamMessage(
           if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || callErr.code === 401) {
             console.warn(`Auth key unregistered on DC ${dcId}, resetting exported sender...`);
             try {
-              if (globalClient?.session && typeof globalClient.session.setAuthKey === 'function') {
-                globalClient.session.setAuthKey(undefined, dcId);
-              }
-              if (typeof (globalClient as any)._removeSender === 'function') {
-                (globalClient as any)._removeSender(dcId);
-              }
-              if ((globalClient as any)._exportedSenderPromises?.has?.(dcId)) {
-                (globalClient as any)._exportedSenderPromises.delete(dcId);
-              }
-              if ((globalClient as any)._borrowedSenderPromises && (globalClient as any)._borrowedSenderPromises[dcId]) {
-                delete (globalClient as any)._borrowedSenderPromises[dcId];
+              if (dcId && (globalClient as any)?.session?.dcId !== dcId) {
+                if (typeof (globalClient as any)._cleanupExportedSender === 'function') {
+                  await (globalClient as any)._cleanupExportedSender(dcId);
+                } else {
+                  if (typeof (globalClient as any)._removeSender === 'function') {
+                    (globalClient as any)._removeSender(dcId);
+                  }
+                  if ((globalClient as any)._exportedSenderPromises?.has?.(dcId)) {
+                    (globalClient as any)._exportedSenderPromises.delete(dcId);
+                  }
+                  if ((globalClient as any)._borrowedSenderPromises && (globalClient as any)._borrowedSenderPromises[dcId]) {
+                    delete (globalClient as any)._borrowedSenderPromises[dcId];
+                  }
+                }
+              } else {
+                if (typeof (globalClient as any)?.connect === 'function') {
+                  await (globalClient as any).connect().catch(() => {});
+                }
               }
             } catch (cleanErr) {
               console.warn('Failed to cleanup exported sender in direct chunk fetch:', cleanErr);
             }
-            await new Promise((r) => setTimeout(r, 300));
+            await new Promise((r) => setTimeout(r, 400));
             continue;
           }
           console.warn(`Chunk fetch attempt ${attempt} warning:`, callErr);

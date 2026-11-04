@@ -10,7 +10,7 @@
  */
 
 import { Api, helpers, errors } from 'telegram';
-import { getTelegramClient } from '../telegram';
+import { getTelegramClient, resolveCachedDocument } from '../telegram';
 import { streamDb, CHUNK_SIZE, type VideoChunkRecord } from '../../db/streamDb';
 
 export interface TgFileOptions {
@@ -331,7 +331,7 @@ export class TgFile {
           precise: true,
         });
 
-        const timeoutMs = chunkIndex === 0 ? 30000 : 20000;
+        const timeoutMs = chunkIndex === 0 ? 15000 : 15000;
         const timeoutController = new AbortController();
         const timeoutId = setTimeout(() => {
           timeoutController.abort();
@@ -354,6 +354,9 @@ export class TgFile {
         });
 
         const fetchPromise = (async () => {
+          if (!(client as any)._sender?.isConnected?.()) {
+            await (client as any).connect?.().catch(() => {});
+          }
           const sender = await (client as any).getSender(this.dcId);
           return await (client as any).invokeWithSender(req, sender);
         })();
@@ -415,22 +418,30 @@ export class TgFile {
         ) {
           console.warn(`Auth key unregistered on DC ${this.dcId}, resetting exported sender...`);
           try {
-            if (typeof (client as any)._removeSender === 'function') {
-              (client as any)._removeSender(this.dcId);
-            }
-            if ((client as any)._exportedSenderPromises?.has?.(this.dcId)) {
-              (client as any)._exportedSenderPromises.delete(this.dcId);
-            }
-            if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[this.dcId]) {
-              delete (client as any)._borrowedSenderPromises[this.dcId];
-            }
-            if (client.session && typeof client.session.setAuthKey === 'function') {
-              client.session.setAuthKey(undefined, this.dcId);
+            if (this.dcId && (client as any).session?.dcId !== this.dcId) {
+              if (typeof (client as any)._cleanupExportedSender === 'function') {
+                await (client as any)._cleanupExportedSender(this.dcId);
+              } else {
+                if (typeof (client as any)._removeSender === 'function') {
+                  (client as any)._removeSender(this.dcId);
+                }
+                if ((client as any)._exportedSenderPromises?.has?.(this.dcId)) {
+                  (client as any)._exportedSenderPromises.delete(this.dcId);
+                }
+                if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[this.dcId]) {
+                  delete (client as any)._borrowedSenderPromises[this.dcId];
+                }
+              }
+            } else {
+              // Master DC: NEVER wipe auth key! Reconnect socket if needed
+              if (typeof (client as any).connect === 'function') {
+                await (client as any).connect().catch(() => {});
+              }
             }
           } catch (cleanErr) {
             console.warn('Failed to cleanup exported sender on auth key failure in TgFile:', cleanErr);
           }
-          await new Promise((r) => setTimeout(r, 300));
+          await new Promise((r) => setTimeout(r, 400));
           continue;
         }
 
@@ -447,6 +458,16 @@ export class TgFile {
 
   private async refreshDocument(client: any): Promise<void> {
     try {
+      const cached = await resolveCachedDocument(this.chatId, this.messageId);
+      if (cached && cached.doc) {
+        this.doc = cached.doc;
+        this.location = cached.location;
+        if ((cached.doc as any).dcId) {
+          this.dcId = (cached.doc as any).dcId;
+        }
+        return;
+      }
+
       let peer: any;
       try {
         peer = await client.getInputEntity(this.chatId);

@@ -298,6 +298,16 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
 
       if (isBuffering || isStalled) {
         const deadMs = Date.now() - lastActiveProgressTimestampRef.current;
+
+        // Auto-heal attempt after 10s of stall before declaring fatal failure
+        if (deadMs > 10000 && deadMs < 35000) {
+          playerEngineRef.current?.bridgeBufferGap();
+          const v = videoRef.current;
+          if (v && v.paused && !playbackError) {
+            v.play().catch(() => {});
+          }
+        }
+
         if (deadMs > 35000) {
           setPlaybackError('Stream playback stalled (>35s): interrupted data stream');
           setIsBuffering(false);
