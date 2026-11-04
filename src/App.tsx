@@ -11,6 +11,7 @@ import { AuthModal } from './components/AuthModal';
 import { ChannelManagerModal } from './components/ChannelManagerModal';
 import { SearchModal } from './components/SearchModal';
 import { ProfileScreen } from './components/ProfileScreen';
+import { BUILD_INFO } from './config/buildInfo';
 import { 
   db, 
   getStoredCredentials, 
@@ -718,6 +719,18 @@ export function App() {
             </div>
           )}
         </div>
+
+        {/* Website Footer */}
+        {!activePlayingItem && !stagingMediaItem && (
+          <footer className="mt-20 pt-8 pb-4 border-t border-white/10 text-center text-xs text-white/50 space-y-1.5 select-none pointer-events-auto">
+            <p className="text-white/80 font-medium tracking-wide">
+              Made by <span className="text-cyan-400 font-semibold">&ldquo;{BUILD_INFO.author}&rdquo;</span>
+            </p>
+            <p className="text-white/40 font-mono text-[11px]">
+              Version {BUILD_INFO.version} &bull; Build: {BUILD_INFO.commit} ({BUILD_INFO.commitName})
+            </p>
+          </footer>
+        )}
       </main>
 
       {/* Apple TV Full-Screen Media Detail View */}

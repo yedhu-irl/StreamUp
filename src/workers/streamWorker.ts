@@ -11,10 +11,12 @@ import {
   readElementId,
   readDataSize,
   parseClusterPayload,
+  cleanSubtitleText,
   EBML_ID,
   type MatroskaMetadata,
   type CueEntry,
   type ParsedBlock,
+  type SubtitleTrackInfo,
 } from '../services/remuxer/ebml.ts';
 import { MatroskaTransmuxer } from '../services/remuxer/transmuxer.ts';
 
@@ -143,9 +145,10 @@ class ChunkFetcher {
   public async fetchChunkByIndex(
     streamId: string,
     chunkIndex: number,
-    timeoutMs = 25000,
+    timeoutMs?: number,
     urgent = true
   ): Promise<Uint8Array> {
+    const effectiveTimeout = timeoutMs ?? (chunkIndex === 0 ? 60000 : 35000);
     const cacheKey = `${streamId}_${chunkIndex}`;
     const cached = this.prefetchMap.get(cacheKey);
     if (cached) {
@@ -171,7 +174,7 @@ class ChunkFetcher {
         this.pendingRequests.delete(requestId);
         this.prefetchMap.delete(cacheKey);
         reject(new Error(`Chunk fetch timeout for chunk ${chunkIndex}`));
-      }, timeoutMs);
+      }, effectiveTimeout);
 
       this.pendingRequests.set(requestId, {
         resolve: (ab: ArrayBuffer) => {
@@ -243,15 +246,16 @@ class ChunkFetcher {
     messageId: string | number,
     offset: number,
     limit: number,
-    timeoutMs = 25000
+    timeoutMs?: number
   ): Promise<ArrayBuffer> {
     const streamId = `${channelId}_${messageId}`;
     const CHUNK_SIZE = 512 * 1024;
     const startChunk = Math.floor(offset / CHUNK_SIZE);
     const endChunk = Math.floor((offset + limit - 1) / CHUNK_SIZE);
+    const effectiveTimeout = timeoutMs ?? (startChunk === 0 ? 60000 : 35000);
 
     if (startChunk === endChunk) {
-      const chunkData = await this.fetchChunkByIndex(streamId, startChunk, timeoutMs);
+      const chunkData = await this.fetchChunkByIndex(streamId, startChunk, effectiveTimeout);
       const chunkStart = startChunk * CHUNK_SIZE;
       const sliceStart = Math.max(0, offset - chunkStart);
       const sliceEnd = Math.min(chunkData.byteLength, sliceStart + limit);
@@ -266,7 +270,7 @@ class ChunkFetcher {
     let written = 0;
 
     for (let c = startChunk; c <= endChunk && written < limit; c++) {
-      const chunkData = await this.fetchChunkByIndex(streamId, c, timeoutMs);
+      const chunkData = await this.fetchChunkByIndex(streamId, c, effectiveTimeout);
       const chunkStart = c * CHUNK_SIZE;
       const sliceStart = Math.max(0, offset - chunkStart);
       const needed = limit - written;
@@ -414,6 +418,7 @@ async function startStream(
       isAudioSupported,
       audioCodecName,
       durationSec: metadata.durationSec,
+      subtitleTracks: metadata.subtitleTracks || [],
     });
 
     // Check if init segment is ready right away
@@ -613,6 +618,27 @@ function processAccumulator(isEof = false): boolean {
     (isEof && videoBlocks.length > 0);
 
   if (shouldEmit) {
+    // Emit any subtitle blocks found in current cluster
+    if (metadata?.subtitleTracks && metadata.subtitleTracks.length > 0) {
+      for (const b of blocks) {
+        const sub = metadata.subtitleTracks.find((s) => s.trackNumber === b.trackNumber);
+        if (sub) {
+          const text = cleanSubtitleText(sub.codecId, b.data);
+          if (text) {
+            const startSec = b.ptsMs / 1000;
+            const durSec = (b.durationMs && b.durationMs > 0 ? b.durationMs : 3000) / 1000;
+            postWorkerMessage({
+              type: 'SUBTITLE_CUE',
+              trackNumber: b.trackNumber,
+              startSec,
+              endSec: startSec + durSec,
+              text,
+            });
+          }
+        }
+      }
+    }
+
     const result = transmuxer.transmuxBlocks(blocks);
 
     if (result?.initSegment) {

@@ -6,6 +6,14 @@
  */
 
 import { tgStreamEngine } from './tgStreamEngine';
+import type { SubtitleTrackInfo } from './remuxer/ebml';
+
+export interface SubtitleCue {
+  trackNumber: number;
+  startSec: number;
+  endSec: number;
+  text: string;
+}
 
 export interface MSEControllerEvents {
   onReady?: (durationSec: number) => void;
@@ -15,6 +23,8 @@ export interface MSEControllerEvents {
   onWaiting?: () => void;
   onPlaying?: () => void;
   onTimeUpdate?: (currentTime: number, duration: number) => void;
+  onSubtitlesLoaded?: (tracks: SubtitleTrackInfo[]) => void;
+  onSubtitleCue?: (cue: SubtitleCue) => void;
 }
 
 export class MSEController {
@@ -171,7 +181,7 @@ export class MSEController {
         break;
 
       case 'METADATA_LOADED': {
-        const { videoCodec, durationSec, isAudioSupported, audioCodec, audioCodecName } = msg;
+        const { videoCodec, durationSec, isAudioSupported, audioCodec, audioCodecName, subtitleTracks } = msg;
         this.durationSec = durationSec || 0;
 
         if (this.durationSec > 0 && this.mediaSource && this.mediaSource.readyState === 'open') {
@@ -196,9 +206,23 @@ export class MSEController {
           this.events.onAudioUnsupported?.(audioCodecName);
         }
 
+        if (subtitleTracks && subtitleTracks.length > 0) {
+          this.events.onSubtitlesLoaded?.(subtitleTracks);
+        }
+
         // Initialize Video SourceBuffer if not yet created
         this.initSourceBuffer(videoCodec);
         // onReady is deferred until SourceBuffer successfully appends initial media segment
+        break;
+      }
+
+      case 'SUBTITLE_CUE': {
+        this.events.onSubtitleCue?.({
+          trackNumber: msg.trackNumber,
+          startSec: msg.startSec,
+          endSec: msg.endSec,
+          text: msg.text,
+        });
         break;
       }
 

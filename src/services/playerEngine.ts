@@ -3,7 +3,8 @@
  * Handles Direct HTTP 206 Native Stream (Path A) vs. MSE Demux/Remux (Path B).
  */
 
-import { MSEController } from './mseController';
+import { MSEController, type SubtitleCue } from './mseController';
+import type { SubtitleTrackInfo } from './remuxer/ebml';
 import { tgStreamEngine } from './tgStreamEngine';
 
 export interface PlayerEngineOptions {
@@ -17,6 +18,8 @@ export interface PlayerEngineOptions {
   onStatus?: (status: string) => void;
   onError?: (error: string) => void;
   onAudioNotice?: (notice: string) => void;
+  onSubtitlesLoaded?: (tracks: SubtitleTrackInfo[]) => void;
+  onSubtitleCue?: (cue: SubtitleCue) => void;
 }
 
 export class PlayerEngine {
@@ -185,6 +188,16 @@ export class PlayerEngine {
       onAudioUnsupported: (codec) => {
         if (!this.isDestroyed) {
           this.options.onAudioNotice?.(`Audio track (${codec}) requires multichannel hardware decoder.`);
+        }
+      },
+      onSubtitlesLoaded: (tracks) => {
+        if (!this.isDestroyed) {
+          this.options.onSubtitlesLoaded?.(tracks);
+        }
+      },
+      onSubtitleCue: (cue) => {
+        if (!this.isDestroyed) {
+          this.options.onSubtitleCue?.(cue);
         }
       },
       onError: (err) => {

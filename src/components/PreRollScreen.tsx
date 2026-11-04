@@ -23,6 +23,7 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
   const [speedBytes, setSpeedBytes] = useState<number>(0);
   const [statusMessage, setStatusMessage] = useState<string>('Reading the video...');
   const [canStartEarly, setCanStartEarly] = useState<boolean>(false);
+  const [showPlayNow, setShowPlayNow] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
 
   const title = item.tmdb?.title || item.parsed.cleanTitle;
@@ -53,6 +54,20 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
   useEffect(() => {
     let isMounted = true;
     let timer: any = null;
+    let hasTriggeredReady = false;
+
+    // Fallback timer: Show Play Now button after 4s, and auto-proceed after 8s
+    const playNowTimer = setTimeout(() => {
+      if (isMounted) setShowPlayNow(true);
+    }, 4000);
+
+    const autoProceedTimer = setTimeout(() => {
+      if (isMounted && !hasTriggeredReady) {
+        hasTriggeredReady = true;
+        setStatusMessage('Launching player...');
+        onReady();
+      }
+    }, 8000);
 
     const startPreload = async () => {
       try {
@@ -81,7 +96,6 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
 
         if (!isMounted) return;
         const dur = item.duration || 0;
-        let hasTriggeredReady = false;
 
         await tgStreamEngine.preloadInitialBuffer(
           streamId,
@@ -128,6 +142,8 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
     return () => {
       isMounted = false;
       if (timer) clearTimeout(timer);
+      clearTimeout(playNowTimer);
+      clearTimeout(autoProceedTimer);
     };
   }, [item, streamId, initialTime, onReady]);
 
@@ -248,9 +264,20 @@ export const PreRollScreen: React.FC<PreRollScreenProps> = ({
                   </span>
                   {percent > 0 && <span className="text-white/40">({percent}%)</span>}
                 </div>
-                {speedBytes > 0 && (
-                  <span className="text-emerald-400 font-semibold">{formatSpeed(speedBytes)}</span>
-                )}
+                <div className="flex items-center space-x-3">
+                  {speedBytes > 0 && (
+                    <span className="text-emerald-400 font-semibold">{formatSpeed(speedBytes)}</span>
+                  )}
+                  {showPlayNow && (
+                    <button
+                      onClick={onReady}
+                      className="px-3 py-1 rounded-full bg-cyan-500 hover:bg-cyan-400 text-black font-semibold font-sans text-xs flex items-center space-x-1 transition shadow-lg shadow-cyan-500/20"
+                    >
+                      <Zap className="w-3 h-3 fill-black text-black" />
+                      <span>Play Now</span>
+                    </button>
+                  )}
+                </div>
               </div>
             </>
           )}

@@ -186,6 +186,16 @@ export interface AudioTrack {
   codecPrivate?: Uint8Array;
 }
 
+export interface SubtitleTrackInfo {
+  trackNumber: number;
+  trackType: number; // 17 = subtitle
+  codecId: string;   // 'S_TEXT/UTF8', 'S_TEXT/ASS', 'S_TEXT/SSA', 'S_TEXT/WEBVTT', etc.
+  language?: string;
+  name?: string;
+  isDefault?: boolean;
+  isForced?: boolean;
+}
+
 export interface CueEntry {
   timeMs: number;
   trackNumber: number;
@@ -199,6 +209,7 @@ export interface MatroskaMetadata {
   segmentDataOffset: number; // absolute file offset where Segment payload starts
   videoTracks: VideoTrack[];
   audioTracks: AudioTrack[];
+  subtitleTracks: SubtitleTrackInfo[];
   cues: CueEntry[];
 }
 
@@ -208,6 +219,7 @@ export interface ParsedBlock {
   isKeyframe: boolean;
   data: Uint8Array;
   frames?: Uint8Array[]; // Unpacked laced frames
+  durationMs?: number;
 }
 
 /**
@@ -393,6 +405,7 @@ export function parseMatroskaHeader(data: Uint8Array): MatroskaMetadata | null {
   let durationSec = 0;
   const videoTracks: VideoTrack[] = [];
   const audioTracks: AudioTrack[] = [];
+  const subtitleTracks: SubtitleTrackInfo[] = [];
   const cues: CueEntry[] = [];
 
   // Parse Segment top-level elements (Info, Tracks, Cues)
@@ -453,6 +466,7 @@ export function parseMatroskaHeader(data: Uint8Array): MatroskaMetadata | null {
           if (track) {
             if (track.type === 'video') videoTracks.push(track.track as VideoTrack);
             else if (track.type === 'audio') audioTracks.push(track.track as AudioTrack);
+            else if (track.type === 'subtitle') subtitleTracks.push(track.track as SubtitleTrackInfo);
           }
         }
         trkOff += tSz.value;
@@ -471,6 +485,7 @@ export function parseMatroskaHeader(data: Uint8Array): MatroskaMetadata | null {
     segmentDataOffset,
     videoTracks,
     audioTracks,
+    subtitleTracks,
     cues,
   };
 }
@@ -479,13 +494,17 @@ function parseTrackEntry(
   data: Uint8Array,
   start: number,
   size: number
-): { type: 'video' | 'audio'; track: VideoTrack | AudioTrack } | null {
+): { type: 'video' | 'audio' | 'subtitle'; track: VideoTrack | AudioTrack | SubtitleTrackInfo } | null {
   let off = start;
   const end = start + size;
 
   let trackNumber = 1;
-  let trackType = 1; // 1 = video, 2 = audio
+  let trackType = 1; // 1 = video, 2 = audio, 17 = subtitle
   let codecId = '';
+  let name = '';
+  let language = '';
+  let isDefault = false;
+  let isForced = false;
   let defaultDuration: number | undefined;
   let codecPrivate: Uint8Array | undefined;
 
@@ -510,6 +529,14 @@ function parseTrackEntry(
       trackType = readUint(data, off, sz.value);
     } else if (el.value === EBML_ID.CODEC_ID) {
       codecId = readString(data, off, sz.value);
+    } else if (el.value === EBML_ID.NAME) {
+      name = readString(data, off, sz.value);
+    } else if (el.value === EBML_ID.LANGUAGE) {
+      language = readString(data, off, sz.value);
+    } else if (el.value === EBML_ID.FLAG_DEFAULT) {
+      isDefault = readUint(data, off, sz.value) === 1;
+    } else if (el.value === EBML_ID.FLAG_FORCED) {
+      isForced = readUint(data, off, sz.value) === 1;
     } else if (el.value === EBML_ID.DEFAULT_DURATION) {
       defaultDuration = readUint(data, off, sz.value);
     } else if (el.value === EBML_ID.CODEC_PRIVATE) {
@@ -585,6 +612,19 @@ function parseTrackEntry(
         samplingFrequency,
         bitDepth,
         codecPrivate,
+      },
+    };
+  } else if (trackType === 17 || codecId.startsWith('S_')) {
+    return {
+      type: 'subtitle',
+      track: {
+        trackNumber,
+        trackType: 17,
+        codecId,
+        language: language || 'und',
+        name: name || undefined,
+        isDefault,
+        isForced,
       },
     };
   }
@@ -858,6 +898,9 @@ export function parseClusterPayload(
       // Parse Block inside BlockGroup
       let bgOff = dataOffset;
       const bgEnd = dataOffset + sz.value;
+      let parsedBlock: any = null;
+      let blockDurationMs: number | undefined;
+
       while (bgOff < bgEnd) {
         const bgEl = readElementId(clusterPayload, bgOff);
         if (!bgEl) break;
@@ -867,27 +910,32 @@ export function parseClusterPayload(
         bgOff += bgSz.length;
         if (bgEl.value === EBML_ID.BLOCK) {
           const blockPayload = clusterPayload.subarray(bgOff, bgOff + bgSz.value);
-          const parsed = parseSimpleBlock(blockPayload);
-          if (parsed) {
-            if (parsed.frames && parsed.frames.length > 1) {
-              for (let f = 0; f < parsed.frames.length; f++) {
-                blocks.push({
-                  trackNumber: parsed.trackNumber,
-                  relativeTime: parsed.relativeTime,
-                  isKeyframe: parsed.isKeyframe && f === 0,
-                  data: parsed.frames[f],
-                  ptsMs: clusterTimeMs + parsed.relativeTime + Math.round(f * 21.333),
-                });
-              }
-            } else {
-              blocks.push({
-                ...parsed,
-                ptsMs: clusterTimeMs + parsed.relativeTime,
-              });
-            }
-          }
+          parsedBlock = parseSimpleBlock(blockPayload);
+        } else if (bgEl.value === EBML_ID.BLOCK_DURATION) {
+          blockDurationMs = readUint(clusterPayload, bgOff, bgSz.value);
         }
         bgOff += bgSz.value;
+      }
+
+      if (parsedBlock) {
+        if (parsedBlock.frames && parsedBlock.frames.length > 1) {
+          for (let f = 0; f < parsedBlock.frames.length; f++) {
+            blocks.push({
+              trackNumber: parsedBlock.trackNumber,
+              relativeTime: parsedBlock.relativeTime,
+              isKeyframe: parsedBlock.isKeyframe && f === 0,
+              data: parsedBlock.frames[f],
+              ptsMs: clusterTimeMs + parsedBlock.relativeTime + Math.round(f * 21.333),
+              durationMs: blockDurationMs,
+            });
+          }
+        } else {
+          blocks.push({
+            ...parsedBlock,
+            ptsMs: clusterTimeMs + parsedBlock.relativeTime,
+            durationMs: blockDurationMs,
+          });
+        }
       }
     }
 
@@ -912,4 +960,82 @@ export function findNextCluster(data: Uint8Array, startOffset = 0): number {
     }
   }
   return -1;
+}
+
+/**
+ * Extracts and cleans text from Matroska subtitle blocks (UTF-8, ASS/SSA, WebVTT)
+ */
+export function cleanSubtitleText(codecId: string, data: Uint8Array): string {
+  try {
+    const raw = new TextDecoder('utf-8').decode(data);
+    if (codecId === 'S_TEXT/ASS' || codecId === 'S_TEXT/SSA') {
+      // In ASS/SSA: Format is ReadOrder, Layer, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+      let commaCount = 0;
+      let textStart = 0;
+      for (let i = 0; i < raw.length; i++) {
+        if (raw[i] === ',') {
+          commaCount++;
+          if (commaCount === 8) {
+            textStart = i + 1;
+            break;
+          }
+        }
+      }
+      const text = commaCount >= 8 ? raw.slice(textStart) : raw;
+      // Strip ASS tags like {\an8}, {\b1}, {\c&H...} and replace \N with newline
+      return text.replace(/\{[^}]+\}/g, '').replace(/\\N/g, '\n').replace(/\\n/g, '\n').trim();
+    }
+    // S_TEXT/UTF8 or S_TEXT/WEBVTT: strip basic HTML tags (e.g. <i>, <b>)
+    return raw.replace(/<[^>]+>/g, '').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Resolves 2/3-letter ISO language codes or track name to human-readable language string
+ */
+export function getLanguageDisplayName(code?: string, name?: string): string {
+  if (name && name.trim()) return name.trim();
+  if (!code) return 'Subtitle';
+  const c = code.toLowerCase().trim();
+  const map: Record<string, string> = {
+    eng: 'English',
+    en: 'English',
+    spa: 'Spanish',
+    es: 'Spanish',
+    fre: 'French',
+    fra: 'French',
+    fr: 'French',
+    ger: 'German',
+    deu: 'German',
+    de: 'German',
+    ita: 'Italian',
+    it: 'Italian',
+    por: 'Portuguese',
+    pt: 'Portuguese',
+    rus: 'Russian',
+    ru: 'Russian',
+    hin: 'Hindi',
+    hi: 'Hindi',
+    tam: 'Tamil',
+    ta: 'Tamil',
+    tel: 'Telugu',
+    te: 'Telugu',
+    mal: 'Malayalam',
+    ml: 'Malayalam',
+    kan: 'Kannada',
+    kn: 'Kannada',
+    zho: 'Chinese',
+    chi: 'Chinese',
+    zh: 'Chinese',
+    jpn: 'Japanese',
+    ja: 'Japanese',
+    kor: 'Korean',
+    ko: 'Korean',
+    ara: 'Arabic',
+    ar: 'Arabic',
+    und: 'Subtitle',
+  };
+  return map[c] || c.toUpperCase();
 }

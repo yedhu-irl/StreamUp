@@ -592,11 +592,14 @@ async function processStreamMessage(
               if (globalClient?.session && typeof globalClient.session.setAuthKey === 'function') {
                 globalClient.session.setAuthKey(undefined, dcId);
               }
-              if (typeof (globalClient as any)._cleanupExportedSender === 'function') {
-                await (globalClient as any)._cleanupExportedSender(dcId);
+              if (typeof (globalClient as any)._removeSender === 'function') {
+                (globalClient as any)._removeSender(dcId);
               }
               if ((globalClient as any)._exportedSenderPromises?.has?.(dcId)) {
                 (globalClient as any)._exportedSenderPromises.delete(dcId);
+              }
+              if ((globalClient as any)._borrowedSenderPromises && (globalClient as any)._borrowedSenderPromises[dcId]) {
+                delete (globalClient as any)._borrowedSenderPromises[dcId];
               }
             } catch (cleanErr) {
               console.warn('Failed to cleanup exported sender in direct chunk fetch:', cleanErr);

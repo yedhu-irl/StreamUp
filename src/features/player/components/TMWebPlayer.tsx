@@ -1,7 +1,7 @@
 // src/features/player/components/TMWebPlayer.tsx
 // TMPlayer-inspired Web Streaming Player (Web-only, Range-based, Seek-aware, Resume-aware)
 
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import {
   Play,
   Pause,
@@ -20,13 +20,13 @@ import {
   AlertCircle,
   Check,
   Wifi,
-  Upload,
   Undo2,
   PlayCircle,
 } from 'lucide-react';
 import type { ChannelVideoItem, SubtitleTrack } from '../../../types';
 import { usePlayerSession } from '../hooks/usePlayerSession';
 import { fetchSubtitleContent, convertSrtToVtt } from '../../../services/telegram';
+import { getLanguageDisplayName } from '../../../services/remuxer/ebml';
 import { PlayerTimebar } from '../../../components/PlayerTimebar';
 import type { ByteRange } from '../../../services/windowPlanner';
 import { PlayerErrorOverlay } from './PlayerErrorOverlay';
@@ -49,7 +49,6 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
   onPlayNextEpisode,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fileId = `${item.channelId}_${item.messageId}`;
   const fileName = item.fileName || item.parsed?.originalFileName || 'video.mp4';
@@ -78,6 +77,8 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
     playbackError,
     hasResumePoint,
     resumeSeconds,
+    embeddedSubtitles,
+    currentSubtitleText,
   } = state;
 
   // Local UI State
@@ -152,7 +153,7 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
   }, [isPlaying, resetControlsTimeout]);
 
   // ────────────────────────────────────────────
-  // Subtitles Loader
+  // Subtitles Loader & Handler
   // ────────────────────────────────────────────
   useEffect(() => {
     let isMounted = true;
@@ -168,16 +169,49 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
           src: url,
         };
         setSubtitles([subTrack]);
-        setActiveSubtitleId(subTrack.id);
       });
     } else {
       setSubtitles([]);
-      setActiveSubtitleId('off');
     }
     return () => {
       isMounted = false;
     };
   }, [item.channelId, item.subtitleMessageId]);
+
+  // Combine external telegram subtitles and container embedded subtitles
+  const availableSubtitles = useMemo(() => {
+    const list: Array<{ id: string; label: string; trackNumber?: number; src?: string }> = [];
+    if (subtitles.length > 0) {
+      list.push(...subtitles);
+    }
+    if (embeddedSubtitles && embeddedSubtitles.length > 0) {
+      embeddedSubtitles.forEach((s) => {
+        const langName = getLanguageDisplayName(s.language, s.name);
+        list.push({
+          id: `mkv_sub_${s.trackNumber}`,
+          label: s.name ? `${s.name} (${langName})` : langName,
+          trackNumber: s.trackNumber,
+        });
+      });
+    }
+    return list;
+  }, [subtitles, embeddedSubtitles]);
+
+  const handleSelectSubtitle = useCallback(
+    (subId: string, trackNumber?: number) => {
+      setActiveSubtitleId(subId);
+      setShowSubMenu(false);
+      if (subId === 'off') {
+        actions.selectSubtitleTrack(null);
+      } else if (typeof trackNumber === 'number') {
+        actions.selectSubtitleTrack(trackNumber);
+      } else {
+        // External telegram subtitle track
+        actions.selectSubtitleTrack(null);
+      }
+    },
+    [actions]
+  );
 
   // Sync Subtitle Track to HTML5 Video
   useEffect(() => {
@@ -195,33 +229,6 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
       }
     }
   }, [activeSubtitleId, subtitles, videoRef]);
-
-  const handleSubtitleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      let text = event.target?.result as string;
-      if (!text) return;
-      if (!text.startsWith('WEBVTT')) {
-        text = convertSrtToVtt(text);
-      }
-      const blob = new Blob([text], { type: 'text/vtt' });
-      const url = URL.createObjectURL(blob);
-      const newTrack: SubtitleTrack = {
-        id: `custom_${Date.now()}`,
-        label: file.name.replace(/\.[^/.]+$/, ''),
-        language: 'und',
-        src: url,
-      };
-      setSubtitles((prev) => [...prev, newTrack]);
-      setActiveSubtitleId(newTrack.id);
-      setShowSubMenu(false);
-    };
-    reader.readAsText(file);
-    if (e.target) e.target.value = '';
-  };
 
   // Sync Audio Tracks
   const checkAudioTracks = useCallback(() => {
@@ -416,14 +423,20 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
         ))}
       </video>
 
-      {/* Hidden File Input for Subtitle Upload */}
-      <input
-        ref={fileInputRef}
-        type="file"
-        accept=".srt,.vtt"
-        onChange={handleSubtitleFileUpload}
-        className="hidden"
-      />
+      {/* Container Embedded / Active Subtitle Overlay */}
+      {activeSubtitleId !== 'off' && currentSubtitleText && (
+        <div className="absolute bottom-16 sm:bottom-20 left-1/2 -translate-x-1/2 max-w-[85%] text-center pointer-events-none z-30 select-none animate-fade-in">
+          <span
+            className="inline-block text-white font-semibold text-base sm:text-lg md:text-2xl tracking-wide whitespace-pre-line leading-relaxed"
+            style={{
+              textShadow:
+                '0 0 4px #000, 0 1px 2px #000, 0 2px 4px #000, 0 3px 6px #000, 0 0 10px rgba(0,0,0,0.85)',
+            }}
+          >
+            {currentSubtitleText}
+          </span>
+        </div>
+      )}
 
       {/* Subtle Top-Left Corner Loading & Speed Badge (TMPlayer style) */}
       {isBuffering && !playbackError && (
@@ -676,13 +689,10 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
                 </button>
 
                 {showSubMenu && (
-                  <div className="absolute bottom-11 right-0 w-52 p-2 rounded-2xl bg-[#1c1c1f]/95 border border-white/15 shadow-2xl backdrop-blur-2xl text-xs space-y-1 z-50">
+                  <div className="absolute bottom-11 right-0 w-56 p-2 rounded-2xl bg-[#1c1c1f]/95 border border-white/15 shadow-2xl backdrop-blur-2xl text-xs space-y-1 z-50 animate-fade-in max-h-72 overflow-y-auto">
                     <p className="px-3 py-1 text-[10px] uppercase font-bold text-white/40 tracking-wider">Subtitles</p>
                     <button
-                      onClick={() => {
-                        setActiveSubtitleId('off');
-                        setShowSubMenu(false);
-                      }}
+                      onClick={() => handleSelectSubtitle('off')}
                       className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all ${
                         activeSubtitleId === 'off' ? 'bg-white/15 text-white font-semibold' : 'text-white/70 hover:bg-white/10'
                       }`}
@@ -690,28 +700,23 @@ export const TMWebPlayer: React.FC<TMWebPlayerProps> = ({
                       <span>Off</span>
                       {activeSubtitleId === 'off' && <Check className="w-3.5 h-3.5 text-cyan-400" />}
                     </button>
-                    {subtitles.map((sub) => (
+                    {availableSubtitles.map((sub) => (
                       <button
                         key={sub.id}
-                        onClick={() => {
-                          setActiveSubtitleId(sub.id);
-                          setShowSubMenu(false);
-                        }}
+                        onClick={() => handleSelectSubtitle(sub.id, sub.trackNumber)}
                         className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-left transition-all ${
                           activeSubtitleId === sub.id ? 'bg-white/15 text-white font-semibold' : 'text-white/70 hover:bg-white/10'
                         }`}
                       >
-                        <span className="truncate">{sub.label}</span>
-                        {activeSubtitleId === sub.id && <Check className="w-3.5 h-3.5 text-cyan-400" />}
+                        <span className="truncate pr-2">{sub.label}</span>
+                        {activeSubtitleId === sub.id && <Check className="w-3.5 h-3.5 text-cyan-400 shrink-0" />}
                       </button>
                     ))}
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      className="w-full flex items-center space-x-2 px-3 py-2 rounded-xl text-left text-white/70 hover:bg-white/10 hover:text-white transition-all border-t border-white/10 pt-2"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>Upload Subtitle...</span>
-                    </button>
+                    {availableSubtitles.length === 0 && (
+                      <div className="px-3 py-2 text-white/40 text-[11px] italic">
+                        No subtitles in video
+                      </div>
+                    )}
                   </div>
                 )}
               </div>

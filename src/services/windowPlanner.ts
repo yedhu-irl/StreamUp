@@ -120,7 +120,7 @@ export function planSymmetricRingBuffer(
   if (totalChunks > 2) pinnedChunks.push(totalChunks - 1);
   if (totalChunks > 3) pinnedChunks.push(totalChunks - 2);
 
-  // Chunks to preload: container header first -> playhead forward -> backward 30s -> tail
+  // Chunks to preload: container header first -> playhead forward -> backward
   const chunksToPreload: number[] = [];
   for (const p of pinnedChunks.slice(0, 2)) {
     if (!chunksToPreload.includes(p)) chunksToPreload.push(p);
@@ -130,9 +130,6 @@ export function planSymmetricRingBuffer(
   }
   for (let c = currentChunk - 1; c >= startChunk; c--) {
     if (!chunksToPreload.includes(c)) chunksToPreload.push(c);
-  }
-  for (const p of pinnedChunks.slice(2)) {
-    if (!chunksToPreload.includes(p)) chunksToPreload.push(p);
   }
 
   return {

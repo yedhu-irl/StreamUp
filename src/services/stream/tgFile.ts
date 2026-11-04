@@ -216,8 +216,11 @@ export class TgFile {
     this.sortQueue();
     this.drainQueue();
 
-    // Saturate remaining MTProto worker slots with lookahead chunks [N+1, N+2, N+3]
-    this.scheduleLookahead(chunkIndex);
+    // Saturate remaining MTProto worker slots with lookahead chunks for active streaming
+    // Do NOT schedule lookahead for chunk 0 (container header) to prevent socket contention on initial connect
+    if (chunkIndex > 0) {
+      this.scheduleLookahead(chunkIndex);
+    }
 
     return promise;
   }
@@ -321,12 +324,25 @@ export class TgFile {
       }
 
       try {
-        const sender = await (client as any).getSender(this.dcId);
         const req = new Api.upload.GetFile({
           location: this.location,
           offset: offsetBig,
           limit: alignedLimit,
           precise: true,
+        });
+
+        const timeoutMs = chunkIndex === 0 ? 30000 : 20000;
+        const timeoutController = new AbortController();
+        const timeoutId = setTimeout(() => {
+          timeoutController.abort();
+        }, timeoutMs);
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutController.signal.addEventListener(
+            'abort',
+            () => reject(new Error(`MTProto request timeout on DC ${this.dcId} (${Math.round(timeoutMs / 1000)}s)`)),
+            { once: true }
+          );
         });
 
         const abortPromise = new Promise<never>((_, reject) => {
@@ -337,10 +353,18 @@ export class TgFile {
           }
         });
 
+        const fetchPromise = (async () => {
+          const sender = await (client as any).getSender(this.dcId);
+          return await (client as any).invokeWithSender(req, sender);
+        })();
+
         const result = await Promise.race([
-          (client as any).invokeWithSender(req, sender),
+          fetchPromise,
           abortPromise,
-        ]);
+          timeoutPromise,
+        ]).finally(() => {
+          clearTimeout(timeoutId);
+        });
 
         if (result instanceof Api.upload.File) {
           const u8 = new Uint8Array(result.bytes.buffer, result.bytes.byteOffset, result.bytes.byteLength);
@@ -383,18 +407,25 @@ export class TgFile {
           continue;
         }
 
-        // Handle Unregistered Auth Key on media DC
-        if (msg.includes('AUTH_KEY_UNREGISTERED') || msg.includes('AUTH_KEY_DUPLICATED') || err.code === 401) {
-          console.warn(`Auth key unregistered on DC ${this.dcId}, resetting exported sender and re-authorizing...`);
+        // Handle Unregistered Auth Key on media DC (HTTP 401 only - never on timeout!)
+        if (
+          msg.includes('AUTH_KEY_UNREGISTERED') ||
+          msg.includes('AUTH_KEY_DUPLICATED') ||
+          err.code === 401
+        ) {
+          console.warn(`Auth key unregistered on DC ${this.dcId}, resetting exported sender...`);
           try {
-            if (client.session && typeof client.session.setAuthKey === 'function') {
-              client.session.setAuthKey(undefined, this.dcId);
-            }
-            if (typeof (client as any)._cleanupExportedSender === 'function') {
-              await (client as any)._cleanupExportedSender(this.dcId);
+            if (typeof (client as any)._removeSender === 'function') {
+              (client as any)._removeSender(this.dcId);
             }
             if ((client as any)._exportedSenderPromises?.has?.(this.dcId)) {
               (client as any)._exportedSenderPromises.delete(this.dcId);
+            }
+            if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[this.dcId]) {
+              delete (client as any)._borrowedSenderPromises[this.dcId];
+            }
+            if (client.session && typeof client.session.setAuthKey === 'function') {
+              client.session.setAuthKey(undefined, this.dcId);
             }
           } catch (cleanErr) {
             console.warn('Failed to cleanup exported sender on auth key failure in TgFile:', cleanErr);
@@ -402,6 +433,8 @@ export class TgFile {
           await new Promise((r) => setTimeout(r, 300));
           continue;
         }
+
+        console.warn(`Chunk ${chunkIndex} attempt ${attempt + 1}/4 warning:`, msg || err);
 
         if (attempt === 3) {
           job.reject(err);

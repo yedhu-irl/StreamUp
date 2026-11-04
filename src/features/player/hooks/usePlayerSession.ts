@@ -5,7 +5,10 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { fileStreamService, type FileMetadata } from '../services/fileStreamService';
 import { resumeStore, type PlaybackResumeState } from '../services/resumeStore';
 import { PlayerEngine } from '../../../services/playerEngine';
+import type { SubtitleTrackInfo } from '../../../services/remuxer/ebml';
+import type { SubtitleCue } from '../../../services/mseController';
 import { tgStreamEngine, type TelemetryEvent } from '../../../services/tgStreamEngine';
+import { resolveCachedDocument } from '../../../services/telegram';
 
 export interface UsePlayerSessionOptions {
   fileId: string;
@@ -30,6 +33,9 @@ export interface PlayerSessionState {
   playbackError: string | null;
   hasResumePoint: boolean;
   resumeSeconds: number;
+  embeddedSubtitles: SubtitleTrackInfo[];
+  currentSubtitleText: string;
+  activeSubtitleTrackNumber: number | null;
 }
 
 const PREBUFFER_TARGET_SEC = 4.0;
@@ -78,12 +84,17 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
   const [playbackError, setPlaybackError] = useState<string | null>(null);
   const [hasResumePoint, setHasResumePoint] = useState<boolean>(false);
   const [resumeSeconds, setResumeSeconds] = useState<number>(0);
+  const [embeddedSubtitles, setEmbeddedSubtitles] = useState<SubtitleTrackInfo[]>([]);
+  const [currentSubtitleText, setCurrentSubtitleText] = useState<string>('');
+  const [activeSubtitleTrackNumber, setActiveSubtitleTrackNumber] = useState<number | null>(null);
 
   const lastSavedTimeRef = useRef<number>(0);
   const lastPruneTimeRef = useRef<number>(0);
   const isWaitingForBufferRef = useRef<boolean>(true);
   const lastBufferedEndRef = useRef<number>(0);
   const lastActiveProgressTimestampRef = useRef<number>(Date.now());
+  const activeSubtitleTrackNumberRef = useRef<number | null>(null);
+  const cuesMapRef = useRef<Map<number, SubtitleCue[]>>(new Map());
 
   // ────────────────────────────────────────────
   // 1. Initial Metadata & Resume Point Discovery
@@ -137,6 +148,29 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       const activeMimeType = mimeType || metadata?.mimeType || 'video/mp4';
       const activeFileSize = fileSize || metadata?.size || 0;
 
+      // Ensure stream descriptor is registered in tgStreamEngine
+      try {
+        const parts = fileId.split('_');
+        if (parts.length >= 2) {
+          const chatId = parts[0];
+          const messageId = parseInt(parts[1], 10);
+          if (!isNaN(messageId)) {
+            const cached = await resolveCachedDocument(chatId, messageId);
+            if (cached?.doc) {
+              await tgStreamEngine.registerStream(
+                chatId,
+                messageId,
+                cached.doc,
+                activeFileName,
+                activeMimeType
+              );
+            }
+          }
+        }
+      } catch (regErr) {
+        console.warn('Stream registration check in startPlayback:', regErr);
+      }
+
       const engine = new PlayerEngine({
         videoElement: videoRef.current,
         streamId: fileId,
@@ -155,6 +189,23 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
         onError: (err) => {
           setPlaybackError(err);
           setIsBuffering(false);
+        },
+        onSubtitlesLoaded: (tracks) => {
+          setEmbeddedSubtitles(tracks);
+        },
+        onSubtitleCue: (cue) => {
+          if (!cuesMapRef.current.has(cue.trackNumber)) {
+            cuesMapRef.current.set(cue.trackNumber, []);
+          }
+          const list = cuesMapRef.current.get(cue.trackNumber)!;
+          list.push(cue);
+          if (activeSubtitleTrackNumberRef.current === cue.trackNumber) {
+            const v = videoRef.current;
+            const ct = v ? v.currentTime : 0;
+            if (ct >= cue.startSec && ct <= cue.endSec) {
+              setCurrentSubtitleText(cue.text);
+            }
+          }
         },
       });
 
@@ -386,6 +437,19 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
     }
   }, [resumeSeconds, seekTo, play]);
 
+  const selectSubtitleTrack = useCallback((trackNumber: number | null) => {
+    activeSubtitleTrackNumberRef.current = trackNumber;
+    setActiveSubtitleTrackNumber(trackNumber);
+    if (trackNumber === null) {
+      setCurrentSubtitleText('');
+    } else {
+      const ct = videoRef.current?.currentTime || currentTime;
+      const cues = cuesMapRef.current.get(trackNumber) || [];
+      const found = cues.find((c) => ct >= c.startSec && ct <= c.endSec);
+      setCurrentSubtitleText(found ? found.text : '');
+    }
+  }, [currentTime]);
+
   // ────────────────────────────────────────────
   // 5. HTML5 Media Event Handlers
   // ────────────────────────────────────────────
@@ -396,6 +460,17 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
     const ct = v.currentTime;
     setCurrentTime(ct);
     updateBufferedState();
+
+    // Check active subtitle cue
+    if (activeSubtitleTrackNumberRef.current !== null) {
+      const cues = cuesMapRef.current.get(activeSubtitleTrackNumberRef.current);
+      if (cues && cues.length > 0) {
+        const found = cues.find((c) => ct >= c.startSec && ct <= c.endSec);
+        setCurrentSubtitleText(found ? found.text : '');
+      } else {
+        setCurrentSubtitleText('');
+      }
+    }
 
     // Rolling 1-minute buffer pruning every 4 seconds
     if (Math.abs(ct - lastPruneTimeRef.current) >= 4) {
@@ -482,6 +557,9 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       playbackError,
       hasResumePoint,
       resumeSeconds,
+      embeddedSubtitles,
+      currentSubtitleText,
+      activeSubtitleTrackNumber,
     },
     actions: {
       play,
@@ -493,6 +571,7 @@ export function usePlayerSession(options: UsePlayerSessionOptions) {
       startPlayback,
       handleRetry,
       retry: handleRetry,
+      selectSubtitleTrack,
       savePlaybackPosition: (sec: number) => resumeStore.savePlaybackPosition(fileId, sec, duration),
       loadPlaybackPosition: () => resumeStore.loadPlaybackPosition(fileId),
       getFileMetadata: () => fileStreamService.getFileMetadata(fileId),

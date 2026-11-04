@@ -1,5 +1,5 @@
 import { Api, helpers, errors } from 'telegram';
-import { getTelegramClient } from './telegram';
+import { getTelegramClient, resolveCachedDocument } from './telegram';
 import { streamDb, CHUNK_SIZE, enforceActiveStreamCache, evictChunksOutsideWindow, type VideoChunkRecord, type StreamDescriptorRecord } from '../db/streamDb';
 import { mergeRanges, isPinnedChunk, planSymmetricRingBuffer, type ByteRange } from './windowPlanner';
 import { getOrCreateTgFile, getActiveTgFile, TgFile } from './stream/tgFile';
@@ -297,6 +297,30 @@ export class TgStreamEngine {
       if (existing) {
         tgFile = existing;
         this.activeTgFile = existing;
+      } else {
+        // Auto-heal: Resolve document and register stream on-the-fly
+        const parts = streamId.split('_');
+        if (parts.length >= 2) {
+          const chatId = parts[0];
+          const messageId = parseInt(parts[1], 10);
+          if (!isNaN(messageId)) {
+            try {
+              const cached = await resolveCachedDocument(chatId, messageId);
+              if (cached && cached.doc) {
+                await this.registerStream(
+                  chatId,
+                  messageId,
+                  cached.doc,
+                  'video.mp4',
+                  cached.mimeType || 'video/mp4'
+                );
+                tgFile = this.activeTgFile;
+              }
+            } catch (resolveErr) {
+              console.warn('Auto-heal document resolve failed in getChunk:', resolveErr);
+            }
+          }
+        }
       }
     }
 
@@ -351,10 +375,27 @@ export class TgStreamEngine {
     chunkIndex: number,
     signal?: AbortSignal
   ): Promise<Uint8Array> {
-    if (!this.activeStream || this.activeStream.streamId !== streamId) {
-      const desc = await streamDb.streamDescriptors.get(streamId);
-      if (!desc) {
-        throw new Error(`Stream ${streamId} not found`);
+    if (!this.activeStream || this.activeStream.streamId !== streamId || !this.activeStream.location) {
+      const parts = streamId.split('_');
+      if (parts.length >= 2) {
+        const chatId = parts[0];
+        const messageId = parseInt(parts[1], 10);
+        if (!isNaN(messageId)) {
+          try {
+            const cached = await resolveCachedDocument(chatId, messageId);
+            if (cached && cached.doc) {
+              await this.registerStream(
+                chatId,
+                messageId,
+                cached.doc,
+                'video.mp4',
+                cached.mimeType || 'video/mp4'
+              );
+            }
+          } catch (resolveErr) {
+            console.warn('Auto-heal document resolve failed in downloadChunkFromTelegram:', resolveErr);
+          }
+        }
       }
     }
 
@@ -448,11 +489,14 @@ export class TgStreamEngine {
             if (client.session && typeof client.session.setAuthKey === 'function') {
               client.session.setAuthKey(undefined, dcId);
             }
-            if (typeof (client as any)._cleanupExportedSender === 'function') {
-              await (client as any)._cleanupExportedSender(dcId);
+            if (typeof (client as any)._removeSender === 'function') {
+              (client as any)._removeSender(dcId);
             }
             if ((client as any)._exportedSenderPromises?.has?.(dcId)) {
               (client as any)._exportedSenderPromises.delete(dcId);
+            }
+            if ((client as any)._borrowedSenderPromises && (client as any)._borrowedSenderPromises[dcId]) {
+              delete (client as any)._borrowedSenderPromises[dcId];
             }
           } catch (cleanErr) {
             console.warn('Failed to cleanup exported sender on auth key failure:', cleanErr);
@@ -570,7 +614,8 @@ export class TgStreamEngine {
     streamId: string,
     chunks: number[],
     concurrency = 3,
-    onChunkDone?: (chunkIndex: number, completedCount: number) => void
+    onChunkDone?: (chunkIndex: number, completedCount: number) => void,
+    urgent = true
   ): Promise<void> {
     const queue = [...chunks];
     let completed = 0;
@@ -579,7 +624,7 @@ export class TgStreamEngine {
         const next = queue.shift();
         if (next === undefined) break;
         try {
-          await this.getChunk(streamId, next, undefined, false);
+          await this.getChunk(streamId, next, undefined, urgent);
         } catch (e) {
           console.warn(`Concurrent chunk ${next} fetch warning:`, e);
         }
@@ -620,25 +665,26 @@ export class TgStreamEngine {
       Math.min(100, Math.round((completedCount / totalToLoad) * 100)),
       0,
       'Connecting to Telegram cloud...',
-      completedCount >= 2 || (totalToLoad <= 2 && completedCount >= 1)
+      completedCount >= 1 || (totalToLoad <= 2 && completedCount >= 1)
     );
 
     await this.fetchChunksConcurrently(
       streamId,
       targetChunks,
-      4,
+      1,
       (_chunkIdx, count) => {
         completedCount = count;
         const pct = Math.min(100, Math.round((completedCount / totalToLoad) * 100));
         const lastSpeed = this.getCurrentSpeed();
-        const canStartEarly = completedCount >= 2 || pct >= 50;
+        const canStartEarly = completedCount >= 1 || pct >= 50;
         onProgress?.(
           pct,
           lastSpeed,
           pct < 100 ? `Buffering playback buffer (${pct}%)...` : 'Playback ready',
           canStartEarly
         );
-      }
+      },
+      true
     );
 
     onProgress?.(100, this.getCurrentSpeed(), 'Playback ready', true);
